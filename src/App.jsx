@@ -208,6 +208,7 @@ export default function PlanBoda() {
 
   const [errorGuardado, setErrorGuardado] = useState(null);
   const [ocultar, setOcultar] = useState(false);
+  const [carta, setCarta] = useState(false);
   OCULTAR_MONTOS = ocultar; // se aplica en el render actual (afecta a fmt en los hijos)
   const update = useCallback((fn) => {
     setData((prev) => {
@@ -265,7 +266,7 @@ export default function PlanBoda() {
         <Fuentes />
         <div style={st.bg} />
         <div style={st.app}>
-          <TopBar fechaRef={fechaRef} setFechaRef={setFechaRef} tab={tab} yo={yo} ocultar={ocultar} setOcultar={setOcultar} />
+          <TopBar fechaRef={fechaRef} setFechaRef={setFechaRef} tab={tab} yo={yo} ocultar={ocultar} setOcultar={setOcultar} onCarta={() => setCarta(true)} />
           {errorGuardado && (
             <div style={{ background: C.terra, color: "#fff", fontFamily: F.body, fontSize: 13, padding: "8px 16px", textAlign: "center", zIndex: 15 }}>
               ⚠️ {errorGuardado}
@@ -281,6 +282,7 @@ export default function PlanBoda() {
           <BottomNav tab={tab} setTab={setTab} />
         </div>
         {confirmState && <ConfirmModal {...confirmState} />}
+        {carta && <CartaModal onClose={() => setCarta(false)} />}
       </div>
     </ConfirmCtx.Provider>
   );
@@ -295,8 +297,8 @@ function IdentidadPicker({ onElegir }) {
         <h1 style={{ ...st.h1, fontSize: 40, margin: "6px 0 4px" }}>Ale &amp; Cande</h1>
         <p style={{ fontFamily: F.body, color: C.wineSoft, marginBottom: 24 }}>¿Quién está usando este celular?</p>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", maxWidth: 280 }}>
-          <button style={{ ...st.btn, padding: "14px 0", fontSize: 17 }} onClick={() => onElegir("Ale")}>👰 Soy Ale</button>
-          <button style={{ ...st.btn, padding: "14px 0", fontSize: 17, background: C.rose }} onClick={() => onElegir("Cande")}>🤵 Soy Cande</button>
+          <button style={{ ...st.btn, padding: "14px 0", fontSize: 17 }} onClick={() => onElegir("Ale")}>🤵 Soy el novio (Ale)</button>
+          <button style={{ ...st.btn, padding: "14px 0", fontSize: 17, background: C.rose }} onClick={() => onElegir("Cande")}>👰 Soy la novia (Cande)</button>
         </div>
         <p style={{ ...st.hint, marginTop: 20 }}>Se usa solo para la doble confirmación al limpiar la app. Lo podés cambiar después.</p>
       </div>
@@ -389,7 +391,7 @@ function PanelLimpiar({ data, update, yo, onCambiarIdentidad }) {
       </section>
 
       <div style={{ textAlign: "center", marginTop: 16 }}>
-        <span style={{ fontSize: 12, color: C.wineSoft, fontFamily: F.body }}>Este celular es de: <strong style={{ color: C.wine }}>{yo}</strong></span>
+        <span style={{ fontSize: 12, color: C.wineSoft, fontFamily: F.body }}><strong style={{ color: C.wine }}>{yo === "Ale" ? "Soy el novio 🤵" : "Soy la novia 👰"}</strong></span>
         <button style={{ ...st.btnGhostSm, marginLeft: 8 }} onClick={onCambiarIdentidad}>Cambiar</button>
       </div>
     </div>
@@ -407,13 +409,15 @@ function OjoIcon({ tachado }) {
   );
 }
 
-function TopBar({ fechaRef, setFechaRef, tab, yo, ocultar, setOcultar }) {
-  const [carta, setCarta] = useState(false);
+function TopBar({ fechaRef, setFechaRef, tab, yo, ocultar, setOcultar, onCarta }) {
   const tituloResumen = yo === "Ale" ? "Ale (Novio 🤵)" : "Cande (Novia 👰)";
   const titulos = { resumen: tituloResumen, gastos: "Costos", ahorros: "Ahorros e ingresos", notas: "Notas", limpiar: "Limpiar app" };
+  const mostrarCarta = yo === "Cande" && tab === "resumen";
   return (
     <header style={st.topbar}>
-      <button style={st.cartaBtn} onClick={() => setCarta(true)} title="Mensaje secreto" aria-label="Mensaje secreto">💌</button>
+      {mostrarCarta && (
+        <button style={st.cartaBtn} onClick={onCarta} title="Mensaje secreto" aria-label="Mensaje secreto">💌</button>
+      )}
 
       <div style={{ textAlign: "center" }}>
         <div style={{ fontSize: 11, letterSpacing: 3, color: C.gold, fontFamily: F.body }}>ALE &amp; CANDE</div>
@@ -426,8 +430,6 @@ function TopBar({ fechaRef, setFechaRef, tab, yo, ocultar, setOcultar }) {
           <OjoIcon tachado={ocultar} />
         </button>
       </div>
-
-      {carta && <CartaModal onClose={() => setCarta(false)} />}
     </header>
   );
 }
@@ -442,7 +444,7 @@ function CartaModal({ onClose }) {
         </h3>
         <p style={st.cartaTexto}>Felicitaciones, encontraste este pequeño rincón secreto de la aplicación. ❤️</p>
         <p style={st.cartaTexto}>
-          Tu premio es un recordatorio oficial de que <strong style={{ color: C.wine }}>sos hermosa</strong>, te amo un montón y tengo
+          Tu premio es un recordatorio oficial de que sos hermosa, te amo un montón y tengo
           muchísimas ganas de que llegue nuestro casamiento.
         </p>
         <p style={{ ...st.cartaTexto, fontStyle: "italic", color: C.wineSoft }}>PD: el desarrollador de esta app también te ama.</p>
