@@ -35,12 +35,17 @@ const APP_VERSION = "v10 · splash";
 /* ----------------------------- Helpers ---------------------------------- */
 const uid = () => Math.random().toString(36).slice(2, 10);
 const todayISO = () => new Date().toISOString().slice(0, 10);
+// Modo privacidad: cuando está activo, fmt() oculta todos los montos.
+// Lo setea el componente raíz en cada render según el estado `ocultar`.
+let OCULTAR_MONTOS = false;
 const fmt = (n) =>
-  new Intl.NumberFormat("es-AR", {
-    style: "currency",
-    currency: "ARS",
-    maximumFractionDigits: 0,
-  }).format(isFinite(n) ? n : 0);
+  OCULTAR_MONTOS
+    ? "$ •••"
+    : new Intl.NumberFormat("es-AR", {
+        style: "currency",
+        currency: "ARS",
+        maximumFractionDigits: 0,
+      }).format(isFinite(n) ? n : 0);
 const fmtFecha = (iso) => {
   if (!iso) return "—";
   const [y, m, d] = iso.split("-");
@@ -202,6 +207,8 @@ export default function PlanBoda() {
   }, []);
 
   const [errorGuardado, setErrorGuardado] = useState(null);
+  const [ocultar, setOcultar] = useState(false);
+  OCULTAR_MONTOS = ocultar; // se aplica en el render actual (afecta a fmt en los hijos)
   const update = useCallback((fn) => {
     setData((prev) => {
       const next = fn(structuredClone(prev));
@@ -258,7 +265,7 @@ export default function PlanBoda() {
         <Fuentes />
         <div style={st.bg} />
         <div style={st.app}>
-          <TopBar fechaRef={fechaRef} setFechaRef={setFechaRef} tab={tab} />
+          <TopBar fechaRef={fechaRef} setFechaRef={setFechaRef} tab={tab} yo={yo} ocultar={ocultar} setOcultar={setOcultar} />
           {errorGuardado && (
             <div style={{ background: C.terra, color: "#fff", fontFamily: F.body, fontSize: 13, padding: "8px 16px", textAlign: "center", zIndex: 15 }}>
               ⚠️ {errorGuardado}
@@ -390,19 +397,59 @@ function PanelLimpiar({ data, update, yo, onCambiarIdentidad }) {
 }
 
 /* ============================== TopBar ================================= */
-function TopBar({ fechaRef, setFechaRef, tab }) {
-  const titulos = { resumen: "Resumen", gastos: "Costos", ahorros: "Ahorros e ingresos", notas: "Notas", limpiar: "Limpiar app" };
+function OjoIcon({ tachado }) {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={C.wine} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+      {tachado && <line x1="3" y1="3" x2="21" y2="21" stroke={C.terra} />}
+    </svg>
+  );
+}
+
+function TopBar({ fechaRef, setFechaRef, tab, yo, ocultar, setOcultar }) {
+  const [carta, setCarta] = useState(false);
+  const tituloResumen = yo === "Ale" ? "Ale (Novio 🤵)" : "Cande (Novia 👰)";
+  const titulos = { resumen: tituloResumen, gastos: "Costos", ahorros: "Ahorros e ingresos", notas: "Notas", limpiar: "Limpiar app" };
   return (
     <header style={st.topbar}>
+      <button style={st.cartaBtn} onClick={() => setCarta(true)} title="Mensaje secreto" aria-label="Mensaje secreto">💌</button>
+
       <div style={{ textAlign: "center" }}>
         <div style={{ fontSize: 11, letterSpacing: 3, color: C.gold, fontFamily: F.body }}>ALE &amp; CANDE</div>
         <h1 style={st.h1}>{titulos[tab]}</h1>
       </div>
       <div style={st.fechaBox}>
-        <span style={{ fontSize: 12, color: C.wineSoft }}>al</span>
+        <span style={{ fontSize: 12, color: C.wineSoft }}>Resumen al</span>
         <input type="date" value={fechaRef} onChange={(e) => setFechaRef(e.target.value)} style={st.dateInput} />
+        <button style={st.ojoBtn} onClick={() => setOcultar((v) => !v)} title={ocultar ? "Mostrar montos" : "Ocultar montos"} aria-label="Ocultar o mostrar montos">
+          <OjoIcon tachado={ocultar} />
+        </button>
       </div>
+
+      {carta && <CartaModal onClose={() => setCarta(false)} />}
     </header>
+  );
+}
+
+function CartaModal({ onClose }) {
+  return (
+    <div style={{ ...st.overlay, zIndex: 90, alignItems: "center" }} onClick={onClose}>
+      <div style={st.cartaModal} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontSize: 34, textAlign: "center", marginBottom: 4 }}>💍❤️</div>
+        <h3 style={{ fontFamily: F.serif, fontSize: 22, color: C.wine, textAlign: "center", margin: "0 0 14px", fontWeight: 700 }}>
+          Mensaje oculto desbloqueado
+        </h3>
+        <p style={st.cartaTexto}>Felicitaciones, encontraste este pequeño rincón secreto de la aplicación. ❤️</p>
+        <p style={st.cartaTexto}>
+          Tu premio es un recordatorio oficial de que <strong style={{ color: C.wine }}>sos hermosa</strong>, te amo un montón y tengo
+          muchísimas ganas de que llegue nuestro casamiento.
+        </p>
+        <p style={{ ...st.cartaTexto, fontStyle: "italic", color: C.wineSoft }}>PD: el desarrollador de esta app también te ama.</p>
+        <p style={{ ...st.cartaTexto, fontStyle: "italic", color: C.wineSoft }}>PD 2: sí, es el mismo que va a casarse con vos 😘</p>
+        <button style={{ ...st.btn, width: "100%", marginTop: 14, background: C.rose }} onClick={onClose}>Cerrar con un beso 💋</button>
+      </div>
+    </div>
   );
 }
 
@@ -1875,7 +1922,8 @@ function Fuentes() {
       "@keyframes pbfloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}" +
       "@keyframes pbfade{0%{opacity:0;transform:translateY(10px)}100%{opacity:1;transform:translateY(0)}}" +
       "@keyframes pbshimmer{0%,100%{opacity:.4}50%{opacity:1}}" +
-      "@keyframes notaPress{from{width:0%}to{width:100%}}";
+      "@keyframes notaPress{from{width:0%}to{width:100%}}" +
+      "@keyframes cartaLatido{0%,100%{transform:scale(1) rotate(-4deg)}50%{transform:scale(1.12) rotate(4deg)}}";
     document.head.appendChild(s);
     return () => { document.head.removeChild(l); document.head.removeChild(s); };
   }, []);
@@ -1898,8 +1946,12 @@ const st = {
 
   topbar: { padding: "16px 16px 10px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10, borderBottom: `1px solid ${C.line}`, background: `linear-gradient(180deg, ${C.ivory}, transparent)`, position: "sticky", top: 0, zIndex: 10, backdropFilter: "blur(6px)" },
   h1: { fontFamily: F.serif, fontSize: 30, fontWeight: 600, color: C.wine, margin: "0", lineHeight: 1 },
-  fechaBox: { display: "inline-flex", alignItems: "center", gap: 6, background: C.card, border: `1px solid ${C.line}`, padding: "5px 12px", borderRadius: 30 },
+  fechaBox: { display: "inline-flex", alignItems: "center", gap: 6, background: C.card, border: `1px solid ${C.line}`, padding: "5px 8px 5px 12px", borderRadius: 30 },
   dateInput: { border: "none", fontFamily: F.body, color: C.wine, fontSize: 13, background: "transparent" },
+  ojoBtn: { background: "transparent", border: "none", cursor: "pointer", padding: "2px 4px 0", display: "flex", alignItems: "center", lineHeight: 0 },
+  cartaBtn: { position: "absolute", top: 12, right: 12, background: "#fff", border: `1px solid ${C.roseLite}`, borderRadius: "50%", width: 38, height: 38, fontSize: 19, cursor: "pointer", boxShadow: "0 3px 10px #7a2e3f22", display: "flex", alignItems: "center", justifyContent: "center", animation: "cartaLatido 1.8s ease-in-out infinite", zIndex: 12 },
+  cartaModal: { background: `linear-gradient(160deg, #fff, ${C.ivory})`, borderRadius: 20, padding: "24px 22px", width: "calc(100% - 36px)", maxWidth: 380, boxShadow: "0 24px 60px #3a161e55", border: `1px solid ${C.roseLite}`, animation: "slideUp .25s ease", maxHeight: "86vh", overflowY: "auto" },
+  cartaTexto: { fontFamily: F.body, fontSize: 15, color: C.wine, lineHeight: 1.6, margin: "0 0 12px", textAlign: "center" },
 
   main: { flex: 1, padding: "16px 14px 96px", overflowY: "auto" },
 
