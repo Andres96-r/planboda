@@ -209,7 +209,13 @@ export default function PlanBoda() {
   const [errorGuardado, setErrorGuardado] = useState(null);
   const [ocultar, setOcultar] = useState(false);
   const [carta, setCarta] = useState(false);
+  const [pedirCodigo, setPedirCodigo] = useState(false);
   OCULTAR_MONTOS = ocultar; // se aplica en el render actual (afecta a fmt en los hijos)
+
+  const toggleOcultar = () => {
+    if (ocultar) setPedirCodigo(true); // para volver a mostrar se pide código
+    else setOcultar(true); // ocultar es libre
+  };
   const update = useCallback((fn) => {
     setData((prev) => {
       const next = fn(structuredClone(prev));
@@ -266,7 +272,7 @@ export default function PlanBoda() {
         <Fuentes />
         <div style={st.bg} />
         <div style={st.app}>
-          <TopBar fechaRef={fechaRef} setFechaRef={setFechaRef} tab={tab} yo={yo} ocultar={ocultar} setOcultar={setOcultar} onCarta={() => setCarta(true)} />
+          <TopBar fechaRef={fechaRef} setFechaRef={setFechaRef} tab={tab} yo={yo} ocultar={ocultar} onToggleOcultar={toggleOcultar} onCarta={() => setCarta(true)} />
           {errorGuardado && (
             <div style={{ background: C.terra, color: "#fff", fontFamily: F.body, fontSize: 13, padding: "8px 16px", textAlign: "center", zIndex: 15 }}>
               ⚠️ {errorGuardado}
@@ -283,6 +289,12 @@ export default function PlanBoda() {
         </div>
         {confirmState && <ConfirmModal {...confirmState} />}
         {carta && <CartaModal onClose={() => setCarta(false)} />}
+        {pedirCodigo && (
+          <CodigoModal
+            onClose={() => setPedirCodigo(false)}
+            onOk={() => { setOcultar(false); setPedirCodigo(false); }}
+          />
+        )}
       </div>
     </ConfirmCtx.Provider>
   );
@@ -409,7 +421,7 @@ function OjoIcon({ tachado }) {
   );
 }
 
-function TopBar({ fechaRef, setFechaRef, tab, yo, ocultar, setOcultar, onCarta }) {
+function TopBar({ fechaRef, setFechaRef, tab, yo, ocultar, onToggleOcultar, onCarta }) {
   const tituloResumen = yo === "Ale" ? "Ale (Novio 🤵)" : "Cande (Novia 👰)";
   const titulos = { resumen: tituloResumen, gastos: "Costos", ahorros: "Ahorros e ingresos", notas: "Notas", limpiar: "Limpiar app" };
   const mostrarCarta = yo === "Cande" && tab === "resumen";
@@ -426,11 +438,41 @@ function TopBar({ fechaRef, setFechaRef, tab, yo, ocultar, setOcultar, onCarta }
       <div style={st.fechaBox}>
         <span style={{ fontSize: 12, color: C.wineSoft }}>Resumen al</span>
         <input type="date" value={fechaRef} onChange={(e) => setFechaRef(e.target.value)} style={st.dateInput} />
-        <button style={st.ojoBtn} onClick={() => setOcultar((v) => !v)} title={ocultar ? "Mostrar montos" : "Ocultar montos"} aria-label="Ocultar o mostrar montos">
+        <button style={st.ojoBtn} onClick={onToggleOcultar} title={ocultar ? "Mostrar montos" : "Ocultar montos"} aria-label="Ocultar o mostrar montos">
           <OjoIcon tachado={ocultar} />
         </button>
       </div>
     </header>
+  );
+}
+
+const CODIGO_MONTOS = "141126";
+function CodigoModal({ onOk, onClose }) {
+  const [codigo, setCodigo] = useState("");
+  const [error, setError] = useState(false);
+  const intentar = () => { if (codigo === CODIGO_MONTOS) onOk(); else setError(true); };
+  return (
+    <div style={{ ...st.overlay, zIndex: 85, alignItems: "center" }} onClick={onClose}>
+      <div style={st.confirm} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontSize: 26, marginBottom: 6 }}>🔒</div>
+        <p style={{ fontFamily: F.body, color: C.wine, fontSize: 15, margin: "0 0 12px" }}>Ingresá el código para mostrar los montos</p>
+        <input
+          type="password"
+          inputMode="numeric"
+          value={codigo}
+          autoFocus
+          onChange={(e) => { setCodigo(e.target.value); setError(false); }}
+          onKeyDown={(e) => { if (e.key === "Enter") intentar(); }}
+          style={{ ...st.input, textAlign: "center", letterSpacing: 6, fontSize: 18 }}
+          placeholder="••••••"
+        />
+        {error && <div style={{ color: C.terra, fontSize: 13, marginTop: 8, fontFamily: F.body }}>Código incorrecto</div>}
+        <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+          <button style={{ ...st.btnGhost, flex: 1 }} onClick={onClose}>Cancelar</button>
+          <button style={{ ...st.btn, flex: 1 }} onClick={intentar}>Mostrar</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -445,7 +487,7 @@ function CartaModal({ onClose }) {
         <p style={st.cartaTexto}>Felicitaciones, encontraste este pequeño rincón secreto de la aplicación. ❤️</p>
         <p style={st.cartaTexto}>
           Tu premio es un recordatorio oficial de que sos hermosa, te amo un montón y tengo
-          muchísimas ganas de que llegue nuestro casamiento.
+          muchísimas ganas de casarme contigo 🥰
         </p>
         <p style={{ ...st.cartaTexto, fontStyle: "italic", color: C.wineSoft }}>PD: el desarrollador de esta app también te ama.</p>
         <p style={{ ...st.cartaTexto, fontStyle: "italic", color: C.wineSoft }}>PD 2: sí, es el mismo que va a casarse con vos 😘</p>
