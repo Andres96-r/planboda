@@ -9,6 +9,7 @@ import React, {
 import { db, auth } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import { signInAnonymously, onAuthStateChanged } from "firebase/auth";
+import { calcProyeccionFlujo, BODA_ISO } from "./grafico";
 
 const DOC_REF = doc(db, "planboda", "main");
 const VACIO = {
@@ -605,6 +606,7 @@ function PanelResumen({ t, data }) {
 function DashboardProximos({ data }) {
   const hoy = todayISO();
   const [mesSel, setMesSel] = useState(null); // null = todos
+  const [verGrafico, setVerGrafico] = useState(false);
   const { carryOver, meses, eventos } = useMemo(() => calcDashboard(data, hoy, 6), [data, hoy]);
 
   const hayDatos = eventos.length > 0 || meses.some((m) => m.ingreso || m.pago);
@@ -629,7 +631,12 @@ function DashboardProximos({ data }) {
 
   return (
     <section style={{ ...st.panel, marginTop: 14 }}>
-      <h2 style={st.h2}>Próximos pagos e ingresos</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <h2 style={{ ...st.h2, margin: 0 }}>Próximos pagos e ingresos</h2>
+        {hayDatos && <button style={st.btnGhostSm} onClick={() => setVerGrafico(true)}>📈 Gráfica</button>}
+      </div>
+
+      {verGrafico && <GraficaFlujo data={data} onClose={() => setVerGrafico(false)} />}
 
       {!hayDatos ? (
         <p style={st.hint}>Cuando cargues pagos con fecha o ingresos futuros, vas a ver acá tu agenda y el balance proyectado mes a mes.</p>
@@ -707,14 +714,104 @@ function DashboardProximos({ data }) {
   );
 }
 
-function Mini({ label, val, color, strong }) {
+/* -------- Gráfica completa: ingresos vs gastos acumulados ------------- */
+function GraficaFlujo({ data, onClose }) {
+  const r = useMemo(() => calcProyeccionFlujo(data, BODA_ISO), [data]);
+
+  const W = 320, H = 172, padL = 6, padR = 6, padT = 12, padB = 26;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+
+  let contenido;
+  if (!r.hayDatos) {
+    contenido = <p style={st.hint}>Cargá ingresos en “Ahorros” y costos con fechas para ver la proyección.</p>;
+  } else {
+    const maxY = Math.max(r.totalIngreso, r.totalGasto, 1);
+    const X = (f) => padL + (diasEntre(f, r.minFecha) / r.diasTotales) * innerW;
+    const Y = (v) => padT + innerH - (v / maxY) * innerH;
+    const linea = (key) => r.puntos.map((p, i) => `${i === 0 ? "M" : "L"}${X(p.fecha).toFixed(1)},${Y(p[key]).toFixed(1)}`).join(" ");
+    const xBoda = X(r.bodaISO);
+
+    // marcas de meses en el eje X
+    const marcas = [];
+    {
+      const d0 = new Date(r.minFecha + "T00:00:00");
+      let m = new Date(d0.getFullYear(), d0.getMonth(), 1);
+      const fin = new Date(r.maxFecha + "T00:00:00");
+      while (m <= fin) {
+        const iso = m.toISOString().slice(0, 10);
+        if (iso >= r.minFecha) marcas.push({ x: X(iso), label: MESES_ABR[m.getMonth()] });
+        m = new Date(m.getFullYear(), m.getMonth() + 1, 1);
+      }
+    }
+
+    contenido = (
+      <>
+        <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
+          {/* grilla horizontal */}
+          {[0.25, 0.5, 0.75, 1].map((q) => (
+            <line key={q} x1={padL} y1={Y(maxY * q)} x2={W - padR} y2={Y(maxY * q)} stroke={C.line} strokeWidth="1" />
+          ))}
+          {/* marcas de mes */}
+          {marcas.map((mk, i) => (
+            <g key={i}>
+              <line x1={mk.x} y1={padT} x2={mk.x} y2={padT + innerH} stroke={C.line} strokeWidth="0.5" opacity="0.5" />
+              <text x={mk.x} y={H - 8} fontSize="8" fill={C.wineSoft} textAnchor="middle" fontFamily="sans-serif">{mk.label}</text>
+            </g>
+          ))}
+          {/* línea fecha de boda */}
+          <line x1={xBoda} y1={padT} x2={xBoda} y2={padT + innerH} stroke={C.gold} strokeWidth="1.5" strokeDasharray="3 3" />
+          <text x={Math.min(xBoda, W - 18)} y={padT + 2} fontSize="8" fill={C.gold} textAnchor="middle" fontFamily="sans-serif">💍</text>
+          {/* curvas */}
+          <path d={linea("gasto")} fill="none" stroke={C.terra} strokeWidth="2" strokeLinejoin="round" />
+          <path d={linea("ingreso")} fill="none" stroke={C.sage} strokeWidth="2" strokeLinejoin="round" />
+          {/* punto de cruce */}
+          {r.cruce && (
+            <circle cx={X(r.cruce.fecha)} cy={Y(r.puntos.find((p) => p.fecha === r.cruce.fecha)?.gasto || 0)} r="4" fill={C.terra} stroke="#fff" strokeWidth="1.5" />
+          )}
+        </svg>
+
+        <div style={{ display: "flex", gap: 14, justifyContent: "center", fontSize: 12, fontFamily: F.body, color: C.wine, marginTop: 4 }}>
+          <span><span style={{ ...st.dashDot, background: C.sage }} /> Ingresos acum.</span>
+          <span><span style={{ ...st.dashDot, background: C.terra }} /> Gastos acum.</span>
+        </div>
+
+        {/* alerta */}
+        {r.cruce ? (
+          <div style={{ ...st.avisoBox, marginTop: 14, borderColor: `${C.terra}` }}>
+            <div style={{ fontWeight: 700, color: C.terra, fontFamily: F.body }}>⚠️ Atención: te quedás corto</div>
+            <p style={{ ...st.hint, marginTop: 4 }}>
+              El <strong style={{ color: C.terra }}>{fmtFecha(r.cruce.fecha)}</strong> los gastos acumulados superan a los ingresos.
+              Ese día te faltarían <strong style={{ color: C.terra }}>{fmt(r.cruce.faltante)}</strong> para cubrir todo lo que vence hasta entonces.
+            </p>
+          </div>
+        ) : (
+          <div style={{ ...st.avisoBox, marginTop: 14, borderColor: `${C.sage}88`, background: "#f3f8f1" }}>
+            <div style={{ fontWeight: 700, color: C.sage, fontFamily: F.body }}>✓ Vas bien encaminados</div>
+            <p style={{ ...st.hint, marginTop: 4 }}>
+              Los ingresos acumulados cubren los gastos en todo el período, hasta la boda. Sobran <strong style={{ color: C.sage }}>{fmt(r.totalIngreso - r.totalGasto)}</strong> al {fmtFecha(r.maxFecha)} 🎉
+            </p>
+          </div>
+        )}
+      </>
+    );
+  }
+
   return (
-    <div style={{ textAlign: "center", flex: 1, minWidth: 110 }}>
-      <div style={{ fontFamily: F.serif, fontSize: strong ? 21 : 18, color, fontWeight: strong ? 700 : 500 }}>{fmt(val)}</div>
-      <div style={{ fontFamily: F.body, fontSize: 11, color: C.wineSoft }}>{label}</div>
+    <div style={{ ...st.overlay, zIndex: 60, alignItems: "center" }} onClick={onClose}>
+      <div style={{ ...st.confirm, maxWidth: 440, width: "calc(100% - 28px)", textAlign: "left", maxHeight: "88vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <h3 style={{ ...st.h3 }}>Proyección hasta la boda</h3>
+          <button style={st.iconBtn} onClick={onClose}>✕</button>
+        </div>
+        {contenido}
+        <div style={{ marginTop: 16, textAlign: "right" }}>
+          <button style={st.btnGhost} onClick={onClose}>Cerrar</button>
+        </div>
+      </div>
     </div>
   );
 }
+
 function Donut({ segments, size = 138, stroke = 20 }) {
   const total = segments.reduce((s, x) => s + x.value, 0) || 1;
   const r = (size - stroke) / 2;
@@ -1064,14 +1161,6 @@ function Item({ catId, item, update, fechaRef }) {
     </div>
   );
 }
-function Metric({ label, val, color }) {
-  return (
-    <div style={{ textAlign: "center", flex: 1 }}>
-      <div style={{ fontFamily: F.body, fontWeight: 600, fontSize: 13, color }}>{val}</div>
-      <div style={{ fontSize: 10, color: C.wineSoft }}>{label}</div>
-    </div>
-  );
-}
 
 /* ========================== PANEL · NOTAS ============================== */
 const estadoRecordatorio = (n, hoy) => {
@@ -1083,14 +1172,13 @@ const estadoRecordatorio = (n, hoy) => {
   return { txt: fmtFecha(n.recordatorioFecha), color: C.wineSoft, urgente: false };
 };
 
-function NotaItem({ n, onVer, onBorrar, onToggleHecha, modoOrden, onSubir, onBajar, esPrimera, esUltima }) {
+function NotaItem({ n, onVer, onBorrar, onToggleHecha }) {
   const pressTimer = React.useRef(null);
   const [presionando, setPresionando] = useState(false);
   const hecha = !!n.hecha;
   const rec = estadoRecordatorio(n, todayISO());
 
   const iniciarPress = (e) => {
-    if (modoOrden) return;
     e.preventDefault();
     setPresionando(true);
     pressTimer.current = setTimeout(() => {
@@ -1117,7 +1205,7 @@ function NotaItem({ n, onVer, onBorrar, onToggleHecha, modoOrden, onSubir, onBaj
       onPointerUp={cancelarPress}
       onPointerLeave={cancelarPress}
       onPointerCancel={cancelarPress}
-      onClick={() => { if (!modoOrden) onVer(n); }}
+      onClick={() => onVer(n)}
     >
       {presionando && (
         <div style={st.notaProgress}>
@@ -1132,34 +1220,20 @@ function NotaItem({ n, onVer, onBorrar, onToggleHecha, modoOrden, onSubir, onBaj
         {rec && !hecha && <div style={{ fontSize: 11, color: rec.color, fontFamily: F.body, fontWeight: 600 }}>{rec.txt}</div>}
       </div>
       {hecha && <span style={st.notaCheckBadge}>✓</span>}
-
-      {modoOrden ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
-          <button style={{ ...st.notaOrdenBtn, opacity: esPrimera ? 0.3 : 1 }} disabled={esPrimera} onClick={(e) => { e.stopPropagation(); onSubir(n.id); }}>▲</button>
-          <button style={{ ...st.notaOrdenBtn, opacity: esUltima ? 0.3 : 1 }} disabled={esUltima} onClick={(e) => { e.stopPropagation(); onBajar(n.id); }}>▼</button>
-        </div>
-      ) : (
-        <button
-          style={st.notaBorrarBtn}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => { e.stopPropagation(); onBorrar(n.id); }}
-          title="Eliminar"
-        >✕</button>
-      )}
+      <button
+        style={st.notaBorrarBtn}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => { e.stopPropagation(); onBorrar(n.id); }}
+        title="Eliminar"
+      >✕</button>
     </div>
   );
 }
-
-const ORDEN_NOTAS_KEY = "planboda:ordenNotas";
-const leerOrden = () => { try { return JSON.parse(localStorage.getItem(ORDEN_NOTAS_KEY)) || []; } catch { return []; } };
-const guardarOrden = (arr) => { try { localStorage.setItem(ORDEN_NOTAS_KEY, JSON.stringify(arr)); } catch {} };
 
 function PanelNotas({ data, update }) {
   const confirm = useConfirm();
   const [modalVer, setModalVer] = useState(null);
   const [modalNueva, setModalNueva] = useState(false);
-  const [modoOrden, setModoOrden] = useState(false);
-  const [orden, setOrden] = useState(() => leerOrden());
   const notas = data.notas || [];
 
   const borrarNota = async (id) => {
@@ -1178,76 +1252,61 @@ function PanelNotas({ data, update }) {
   const guardarNota = async ({ titulo, descripcion, tipo, recordatorioFecha }) => {
     if (!titulo.trim() && !descripcion.trim()) return;
     if (!(await confirm("¿Guardar la nota?"))) return;
-    const nuevoId = uid();
     update((d) => {
-      d.notas = [{ id: nuevoId, titulo: titulo.trim(), descripcion: descripcion.trim(), fecha: todayISO(), hecha: false, tipo, recordatorioFecha: tipo === "recordatorio" ? recordatorioFecha : null }, ...(d.notas || [])];
+      d.notas = [{ id: uid(), titulo: titulo.trim(), descripcion: descripcion.trim(), fecha: todayISO(), hecha: false, tipo, recordatorioFecha: tipo === "recordatorio" ? recordatorioFecha : null }, ...(d.notas || [])];
       return d;
     });
-    const nuevoOrden = [nuevoId, ...orden];
-    setOrden(nuevoOrden); guardarOrden(nuevoOrden);
     setModalNueva(false);
   };
 
-  // ordenar pendientes según orden local del celular
-  const pendientesRaw = notas.filter((n) => !n.hecha);
-  const pendientes = [...pendientesRaw].sort((a, b) => {
-    const ia = orden.indexOf(a.id), ib = orden.indexOf(b.id);
-    if (ia === -1 && ib === -1) return 0;
-    if (ia === -1) return -1; // nuevas (sin orden) arriba
-    if (ib === -1) return 1;
-    return ia - ib;
-  });
+  const pendientes = notas.filter((n) => !n.hecha);
+  // recordatorios arriba (por fecha más próxima); notas comunes abajo (orden de carga)
+  const recordatorios = pendientes
+    .filter((n) => n.tipo === "recordatorio" && n.recordatorioFecha)
+    .sort((a, b) => (a.recordatorioFecha || "").localeCompare(b.recordatorioFecha || ""));
+  const notasComunes = pendientes.filter((n) => !(n.tipo === "recordatorio" && n.recordatorioFecha));
   const hechas = notas.filter((n) => n.hecha);
 
-  const mover = (id, dir) => {
-    const ids = pendientes.map((n) => n.id);
-    const i = ids.indexOf(id);
-    const j = i + dir;
-    if (j < 0 || j >= ids.length) return;
-    [ids[i], ids[j]] = [ids[j], ids[i]];
-    setOrden(ids); guardarOrden(ids);
-  };
+  const renderLista = (arr) => (
+    <div style={st.notaLista}>
+      {arr.map((n) => (
+        <NotaItem key={n.id} n={n} onVer={setModalVer} onBorrar={borrarNota} onToggleHecha={toggleHecha} />
+      ))}
+    </div>
+  );
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 8 }}>
-        <p style={{ ...st.hint, margin: 0, flex: 1 }}>
-          {modoOrden ? "Usá ▲▼ para reordenar (orden propio de este celular)" : "Tocá para ver · Mantené 3 seg para marcar como lista"}
-        </p>
-        {pendientes.length > 1 && (
-          <button style={st.btnGhostSm} onClick={() => setModoOrden((v) => !v)}>{modoOrden ? "✓ Listo" : "↕ Ordenar"}</button>
-        )}
-      </div>
+      <p style={{ ...st.hint, marginBottom: 12 }}>Tocá para ver · Mantené 3 seg para marcar como lista</p>
 
       {notas.length === 0 && (
         <div style={st.empty}>Todavía no hay notas. Tocá <strong>+ Nota</strong> para agregar la primera.</div>
       )}
 
-      {pendientes.length > 0 && (
-        <div style={st.notaLista}>
-          {pendientes.map((n, i) => (
-            <NotaItem
-              key={n.id} n={n} onVer={setModalVer} onBorrar={borrarNota} onToggleHecha={toggleHecha}
-              modoOrden={modoOrden}
-              onSubir={(id) => mover(id, -1)} onBajar={(id) => mover(id, 1)}
-              esPrimera={i === 0} esUltima={i === pendientes.length - 1}
-            />
-          ))}
-        </div>
-      )}
-
-      {hechas.length > 0 && !modoOrden && (
+      {recordatorios.length > 0 && (
         <>
-          <div style={{ fontSize: 11, color: C.wineSoft, fontFamily: F.body, margin: "14px 0 6px", letterSpacing: 1, textTransform: "uppercase" }}>Listas ✓</div>
-          <div style={st.notaLista}>
-            {hechas.map((n) => (
-              <NotaItem key={n.id} n={n} onVer={setModalVer} onBorrar={borrarNota} onToggleHecha={toggleHecha} />
-            ))}
-          </div>
+          <div style={st.notaSeccionTit}>⏰ Recordatorios</div>
+          {renderLista(recordatorios)}
         </>
       )}
 
-      {!modoOrden && <button style={st.fab} onClick={() => setModalNueva(true)}>+ Nota</button>}
+      {recordatorios.length > 0 && notasComunes.length > 0 && <div style={st.notaDivisor} />}
+
+      {notasComunes.length > 0 && (
+        <>
+          <div style={st.notaSeccionTit}>📝 Notas</div>
+          {renderLista(notasComunes)}
+        </>
+      )}
+
+      {hechas.length > 0 && (
+        <>
+          <div style={{ ...st.notaSeccionTit, marginTop: 16 }}>Listas ✓</div>
+          {renderLista(hechas)}
+        </>
+      )}
+
+      <button style={st.fab} onClick={() => setModalNueva(true)}>+ Nota</button>
 
       {modalVer && <ModalVerNota nota={modalVer} onClose={() => setModalVer(null)} />}
 
@@ -1261,7 +1320,6 @@ function PanelNotas({ data, update }) {
 }
 
 function ModalVerNota({ nota, onClose }) {
-  const lineaH = 28;
   return (
     <div style={{ ...st.overlay, zIndex: 50, alignItems: "center" }} onClick={onClose}>
       <div style={st.cuadernillo} onClick={(e) => e.stopPropagation()}>
@@ -1831,11 +1889,8 @@ const st = {
 
   panel: { background: C.card, border: `1px solid ${C.line}`, borderRadius: 18, padding: 16, boxShadow: "0 6px 16px #7a2e3f0d" },
   avisoBox: { background: "#fff6f1", border: `1px solid ${C.terra}55`, borderRadius: 14, padding: 14 },
-  proyRow: { display: "flex", flexWrap: "wrap", gap: 10, marginTop: 14, justifyContent: "space-between" },
   hint: { fontSize: 13, color: C.wineSoft, fontFamily: F.body, margin: "8px 0 0" },
 
-  barTrack: { height: 14, background: C.roseLite, borderRadius: 20, overflow: "hidden" },
-  barFill: { height: "100%", borderRadius: 20, transition: "width .5s ease" },
   barTrackSm: { height: 6, background: C.roseLite, borderRadius: 6, overflow: "hidden", margin: "0 0 8px" },
   barFillSm: { height: "100%", background: `linear-gradient(90deg, ${C.rose}, ${C.gold})`, transition: "width .4s ease" },
   catBarTop: { display: "flex", justifyContent: "space-between", fontSize: 13, fontFamily: F.body, color: C.wine, marginBottom: 4 },
@@ -1852,7 +1907,6 @@ const st = {
   itemHead: { display: "flex", gap: 10, padding: "0 12px 6px", alignItems: "flex-start" },
   itemNombre: { fontFamily: F.body, fontWeight: 600, color: C.wine, fontSize: 15 },
   itemSub: { fontSize: 11, color: C.wineSoft, marginTop: 2 },
-  itemMetrics: { display: "flex", gap: 4, padding: "0 12px 8px" },
   badgePago: { fontSize: 10, background: C.sage, color: "#fff", padding: "2px 7px", borderRadius: 20 },
   badgePend: { fontSize: 10, background: C.roseLite, color: C.wine, padding: "2px 7px", borderRadius: 20 },
   alerta: { fontSize: 12, color: C.terra, padding: "0 12px 8px", fontWeight: 600 },
@@ -1865,7 +1919,6 @@ const st = {
   btnGhost: { background: "transparent", color: C.wine, border: `1px solid ${C.rose}`, borderRadius: 30, padding: "9px 16px", fontFamily: F.body, fontSize: 14, cursor: "pointer" },
   btnGhostSm: { background: "transparent", color: C.wine, border: `1px solid ${C.rose}`, borderRadius: 24, padding: "6px 12px", fontFamily: F.body, fontSize: 12, cursor: "pointer" },
   btnSm: { background: C.rose, color: "#fff", border: "none", borderRadius: 24, padding: "6px 14px", fontFamily: F.body, fontSize: 13, cursor: "pointer" },
-  btnDanger: { background: "transparent", color: C.terra, border: `1px solid ${C.terra}55`, borderRadius: 24, padding: "6px 12px", fontFamily: F.body, fontSize: 12, cursor: "pointer" },
   iconBtn: { background: "transparent", border: "none", cursor: "pointer", fontSize: 16, padding: 4, lineHeight: 1 },
   fab: { position: "sticky", bottom: 8, width: "100%", background: C.wine, color: "#fff", border: "none", borderRadius: 30, padding: "13px 0", fontFamily: F.body, fontSize: 15, cursor: "pointer", fontWeight: 600, boxShadow: "0 8px 20px #7a2e3f33", marginTop: 8 },
 
@@ -1926,7 +1979,8 @@ const st = {
   notaItemTituloHecha: { textDecoration: "line-through", color: C.wineSoft, fontWeight: 400 },
   notaCheckBadge: { fontSize: 12, color: C.sage, fontWeight: 700, flexShrink: 0 },
   notaBorrarBtn: { background: "transparent", border: "none", color: C.wineSoft, cursor: "pointer", fontSize: 13, padding: "2px 6px", flexShrink: 0, lineHeight: 1 },
-  notaOrdenBtn: { background: C.roseLite, border: "none", color: C.wine, cursor: "pointer", fontSize: 11, width: 26, height: 18, borderRadius: 5, lineHeight: 1, padding: 0 },
+  notaSeccionTit: { fontFamily: F.body, fontSize: 12, fontWeight: 600, letterSpacing: 1, textTransform: "uppercase", color: C.wineSoft, margin: "0 0 7px" },
+  notaDivisor: { height: 1, background: `linear-gradient(90deg, transparent, ${C.rose}, transparent)`, margin: "18px 0 14px", opacity: 0.6 },
   notaProgress: { position: "absolute", bottom: 0, left: 0, right: 0, height: 3 },
   notaProgressBar: { height: "100%", background: C.gold, borderRadius: 2, width: "0%" },
 
