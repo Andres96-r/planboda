@@ -9,7 +9,7 @@ import React, {
 import { db, auth } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
 import { signInAnonymously, onAuthStateChanged } from "firebase/auth";
-import { calcProyeccionFlujo, BODA_ISO } from "./grafico";
+import { calcProyeccionFlujo, recolectarEventos, acumuladoHasta, BODA_ISO } from "./grafico";
 
 const DOC_REF = doc(db, "planboda", "main");
 const VACIO = {
@@ -127,70 +127,33 @@ const mesKey = (y, m) => `${y}-${String(m + 1).padStart(2, "0")}`;
 
 function calcDashboard(data, hoyISO, nMeses = 6) {
   const now = new Date(hoyISO + "T00:00:00");
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const monthStartISO = monthStart.toISOString().slice(0, 10);
-  const finVentanaISO = new Date(now.getFullYear(), now.getMonth() + nMeses, 1).toISOString().slice(0, 10);
+  const monthStartISO = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+  const { ingresos, gastos } = recolectarEventos(data, BODA_ISO);
 
+  // Barras mensuales: acumulado desde el inicio hasta el último día de cada mes
   const meses = [];
   for (let i = 0; i < nMeses; i++) {
     const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
-    meses.push({ key: mesKey(d.getFullYear(), d.getMonth()), label: MESES_ABR[d.getMonth()], anio: d.getFullYear(), ingreso: 0, pago: 0 });
+    const finMesISO = new Date(d.getFullYear(), d.getMonth() + 1, 0).toISOString().slice(0, 10);
+    const ingreso = acumuladoHasta(ingresos, finMesISO);
+    const pago = acumuladoHasta(gastos, finMesISO);
+    meses.push({ key: mesKey(d.getFullYear(), d.getMonth()), label: MESES_ABR[d.getMonth()], anio: d.getFullYear(), ingreso, pago, balance: ingreso - pago });
   }
-  const idxMes = (iso) => meses.findIndex((mm) => mm.key === (iso || "").slice(0, 7));
 
+  // Balance hasta hoy = todo lo cargado con fecha <= hoy
+  const balanceHoy = acumuladoHasta(ingresos, hoyISO) - acumuladoHasta(gastos, hoyISO);
+
+  // Agenda: pagos pendientes (cualquier fecha, marcando vencidos) + ingresos del mes en adelante
   const eventos = [];
-  let inflowsBefore = 0, outflowsBefore = 0;
-
-  (data.ahorros || []).forEach((a) => {
-    const monto = +a.monto || 0;
-    if ((a.fecha || "") < monthStartISO) { inflowsBefore += monto; return; }
-    const ix = idxMes(a.fecha);
-    if (ix >= 0) meses[ix].ingreso += monto;
-    if (a.fecha < finVentanaISO) eventos.push({ fecha: a.fecha, tipo: "ingreso", nombre: a.descripcion || "Ahorro", monto });
+  gastos.forEach((g) => {
+    if (g.pendiente) eventos.push({ fecha: g.fecha, tipo: "pago", nombre: g.nombre, monto: g.monto, cat: g.cat, vencida: g.fecha < hoyISO });
   });
-  (data.ingresos || []).forEach((i) => {
-    const monto = +i.monto || 0;
-    if ((i.fecha || "") < monthStartISO) { inflowsBefore += monto; return; }
-    const ix = idxMes(i.fecha);
-    if (ix >= 0) meses[ix].ingreso += monto;
-    if (i.fecha < finVentanaISO) eventos.push({ fecha: i.fecha, tipo: "ingreso", nombre: i.descripcion || "Ingreso", monto });
+  ingresos.forEach((i) => {
+    if (i.fecha >= monthStartISO) eventos.push({ fecha: i.fecha, tipo: "ingreso", nombre: i.nombre, monto: i.monto });
   });
-
-  (data.categorias || []).forEach((cat) => {
-    (cat.items || []).forEach((it) => {
-      if (it.modalidad === "cuotas") {
-        (it.cuotas || []).forEach((q) => {
-          const monto = +q.monto || 0;
-          if (q.pagada) {
-            if ((q.fechaPago || q.fechaVencimiento || "") < monthStartISO) outflowsBefore += monto;
-            return;
-          }
-          const vencida = q.fechaVencimiento < monthStartISO;
-          const ix = vencida ? 0 : idxMes(q.fechaVencimiento);
-          if (ix >= 0) meses[ix].pago += monto;
-          if (vencida || q.fechaVencimiento < finVentanaISO)
-            eventos.push({ fecha: q.fechaVencimiento, tipo: "pago", nombre: `${it.nombre} · cuota`, monto, cat: cat.nombre, vencida });
-        });
-      } else {
-        (it.pagos || []).forEach((p) => { if ((p.fecha || "") < monthStartISO) outflowsBefore += +p.monto || 0; });
-        const c = calcItem(it);
-        if (c.pendiente > 0 && it.fechaLimite) {
-          const vencida = it.fechaLimite < monthStartISO;
-          const ix = vencida ? 0 : idxMes(it.fechaLimite);
-          if (ix >= 0) meses[ix].pago += c.pendiente;
-          if (vencida || it.fechaLimite < finVentanaISO)
-            eventos.push({ fecha: it.fechaLimite, tipo: "pago", nombre: it.nombre, monto: c.pendiente, cat: cat.nombre, vencida });
-        }
-      }
-    });
-  });
-
-  const carryOver = inflowsBefore - outflowsBefore;
-  let running = carryOver;
-  meses.forEach((mm) => { mm.neto = mm.ingreso - mm.pago; running += mm.neto; mm.balance = running; });
-
   eventos.sort((a, b) => (a.fecha || "").localeCompare(b.fecha || ""));
-  return { carryOver, meses, eventos };
+
+  return { balanceHoy, meses, eventos };
 }
 
 /* ===================== Confirmación (contexto) ========================== */
@@ -607,32 +570,40 @@ function DashboardProximos({ data }) {
   const hoy = todayISO();
   const [mesSel, setMesSel] = useState(null); // null = todos
   const [verGrafico, setVerGrafico] = useState(false);
-  const { carryOver, meses, eventos } = useMemo(() => calcDashboard(data, hoy, 6), [data, hoy]);
+  const [abrePagos, setAbrePagos] = useState(true);
+  const [abreIngresos, setAbreIngresos] = useState(false);
+  const { balanceHoy, meses, eventos } = useMemo(() => calcDashboard(data, hoy, 6), [data, hoy]);
 
   const hayDatos = eventos.length > 0 || meses.some((m) => m.ingreso || m.pago);
   const maxAbs = Math.max(1, ...meses.map((m) => Math.max(m.ingreso, m.pago)));
 
   // filtro por mes seleccionado
   const eventosFiltrados = mesSel ? eventos.filter((e) => (e.fecha || "").slice(0, 7) === mesSel) : eventos;
+  const pagos = eventosFiltrados.filter((e) => e.tipo === "pago");
+  const ingresosEv = eventosFiltrados.filter((e) => e.tipo === "ingreso");
+  const totalPagos = pagos.reduce((s, e) => s + e.monto, 0);
+  const totalIngresos = ingresosEv.reduce((s, e) => s + e.monto, 0);
 
-  // agrupar agenda por tramo
-  const finSemanaISO = new Date(new Date(hoy + "T00:00:00").getTime() + 7 * 86400000).toISOString().slice(0, 10);
-  const finMesISO = (() => { const d = new Date(hoy + "T00:00:00"); return new Date(d.getFullYear(), d.getMonth() + 1, 1).toISOString().slice(0, 10); })();
-  const grupos = [
-    { titulo: "Esta semana", items: [] },
-    { titulo: "Resto del mes", items: [] },
-    { titulo: "Próximos meses", items: [] },
-  ];
-  eventosFiltrados.forEach((e) => {
-    if (e.fecha < finSemanaISO || e.vencida) grupos[0].items.push(e);
-    else if (e.fecha < finMesISO) grupos[1].items.push(e);
-    else grupos[2].items.push(e);
-  });
+  const filaEvento = (e, i) => (
+    <div key={i} style={st.dashEvento}>
+      <span style={{ ...st.dashEventoDot, background: e.tipo === "ingreso" ? C.sage : e.vencida ? C.terra : C.rose }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={st.dashEventoNombre}>
+          {e.nombre}
+          {e.vencida && <span style={st.dashVencida}>vencido</span>}
+        </div>
+        <div style={st.dashEventoFecha}>{e.tipo === "ingreso" ? "Ingreso" : e.cat || "Pago"} · {fmtFecha(e.fecha)}</div>
+      </div>
+      <span style={{ fontFamily: F.serif, fontWeight: 600, fontSize: 15, color: e.tipo === "ingreso" ? C.sage : C.terra }}>
+        {e.tipo === "ingreso" ? "+" : "−"}{fmt(e.monto)}
+      </span>
+    </div>
+  );
 
   return (
     <section style={{ ...st.panel, marginTop: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <h2 style={{ ...st.h2, margin: 0 }}>Próximos pagos e ingresos</h2>
+        <h2 style={{ ...st.h2, margin: 0, fontSize: 20 }}>BALANCE DE CAJA BODA 💍🤵👰</h2>
         {hayDatos && <button style={st.btnGhostSm} onClick={() => setVerGrafico(true)}>📈 Gráfica</button>}
       </div>
 
@@ -642,13 +613,13 @@ function DashboardProximos({ data }) {
         <p style={st.hint}>Cuando cargues pagos con fecha o ingresos futuros, vas a ver acá tu agenda y el balance proyectado mes a mes.</p>
       ) : (
         <>
-          {/* Saldo de arrastre */}
+          {/* Balance hasta hoy */}
           <div style={st.dashArrastre}>
-            <span style={{ fontFamily: F.body, fontSize: 12, color: C.wineSoft }}>Balance al inicio del mes</span>
-            <span style={{ fontFamily: F.serif, fontSize: 20, fontWeight: 700, color: carryOver >= 0 ? C.sage : C.terra }}>{fmt(carryOver)}</span>
+            <span style={{ fontFamily: F.body, fontSize: 12, color: C.wineSoft }}>Balance hasta la fecha {fmtFecha(hoy)}</span>
+            <span style={{ fontFamily: F.serif, fontSize: 20, fontWeight: 700, color: balanceHoy >= 0 ? C.sage : C.terra }}>{fmt(balanceHoy)}</span>
           </div>
 
-          {/* Tira de meses */}
+          {/* Tira de meses (acumulado hasta fin de cada mes) */}
           <div style={st.dashMesesWrap}>
             {meses.map((m) => {
               const on = mesSel === m.key;
@@ -660,8 +631,8 @@ function DashboardProximos({ data }) {
                 >
                   <div style={st.dashMesLabel}>{m.label}</div>
                   <div style={st.dashMesBarras}>
-                    <div style={{ ...st.dashBar, height: `${(m.ingreso / maxAbs) * 100}%`, background: C.sage }} title={`Ingresos ${fmt(m.ingreso)}`} />
-                    <div style={{ ...st.dashBar, height: `${(m.pago / maxAbs) * 100}%`, background: C.terra }} title={`Pagos ${fmt(m.pago)}`} />
+                    <div style={{ ...st.dashBar, height: `${(m.ingreso / maxAbs) * 100}%`, background: C.sage }} title={`Ingresos acum. ${fmt(m.ingreso)}`} />
+                    <div style={{ ...st.dashBar, height: `${(m.pago / maxAbs) * 100}%`, background: C.terra }} title={`Gastos acum. ${fmt(m.pago)}`} />
                   </div>
                   <div style={{ ...st.dashMesNeto, color: m.balance >= 0 ? C.sage : C.terra }}>{fmt(m.balance)}</div>
                 </button>
@@ -669,44 +640,36 @@ function DashboardProximos({ data }) {
             })}
           </div>
           <div style={st.dashLeyenda}>
-            <span><span style={{ ...st.dashDot, background: C.sage }} /> Ingresos</span>
-            <span><span style={{ ...st.dashDot, background: C.terra }} /> Pagos</span>
-            <span style={{ color: C.wineSoft }}>· abajo: balance acumulado</span>
+            <span><span style={{ ...st.dashDot, background: C.sage }} /> Ingresos acum.</span>
+            <span><span style={{ ...st.dashDot, background: C.terra }} /> Gastos acum.</span>
+            <span style={{ color: C.wineSoft }}>· abajo: balance</span>
           </div>
 
-          {/* Agenda */}
-          <div style={{ marginTop: 6 }}>
+          {/* Agenda desplegable: pagos / ingresos */}
+          <div style={{ marginTop: 10 }}>
             {mesSel && (
-              <div style={{ fontSize: 12, color: C.rose, fontFamily: F.body, marginBottom: 6 }}>
+              <div style={{ fontSize: 12, color: C.rose, fontFamily: F.body, marginBottom: 8 }}>
                 Filtrando {MESES_ABR[Number(mesSel.slice(5)) - 1]} · <button style={st.dashLimpiarFiltro} onClick={() => setMesSel(null)}>ver todo</button>
               </div>
             )}
-            {grupos.every((g) => g.items.length === 0) ? (
-              <p style={st.hint}>No hay vencimientos ni ingresos en este período.</p>
-            ) : (
-              grupos.map((g) =>
-                g.items.length === 0 ? null : (
-                  <div key={g.titulo} style={{ marginTop: 10 }}>
-                    <div style={st.dashGrupoTit}>{g.titulo}</div>
-                    {g.items.map((e, i) => (
-                      <div key={i} style={st.dashEvento}>
-                        <span style={{ ...st.dashEventoDot, background: e.tipo === "ingreso" ? C.sage : e.vencida ? C.terra : C.rose }} />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={st.dashEventoNombre}>
-                            {e.nombre}
-                            {e.vencida && <span style={st.dashVencida}>vencido</span>}
-                          </div>
-                          <div style={st.dashEventoFecha}>{e.tipo === "ingreso" ? "Ingreso" : e.cat ? e.cat : "Pago"} · {fmtFecha(e.fecha)}</div>
-                        </div>
-                        <span style={{ fontFamily: F.serif, fontWeight: 600, fontSize: 15, color: e.tipo === "ingreso" ? C.sage : C.terra }}>
-                          {e.tipo === "ingreso" ? "+" : "−"}{fmt(e.monto)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )
-              )
-            )}
+
+            <button style={st.dashDesplegable} onClick={() => setAbrePagos((v) => !v)}>
+              <span style={{ flex: 1, textAlign: "left" }}>💸 Pagos próximos <span style={st.dashConteo}>({pagos.length})</span></span>
+              <span style={{ color: C.terra, fontWeight: 600, marginRight: 8 }}>{fmt(totalPagos)}</span>
+              <span style={{ color: C.rose, fontSize: 16, transform: abrePagos ? "rotate(90deg)" : "none", transition: "transform .2s" }}>›</span>
+            </button>
+            {abrePagos && (pagos.length === 0
+              ? <p style={{ ...st.hint, margin: "4px 0 8px" }}>No hay pagos en este período.</p>
+              : <div style={{ marginBottom: 8 }}>{pagos.map(filaEvento)}</div>)}
+
+            <button style={st.dashDesplegable} onClick={() => setAbreIngresos((v) => !v)}>
+              <span style={{ flex: 1, textAlign: "left" }}>💰 Ingresos próximos <span style={st.dashConteo}>({ingresosEv.length})</span></span>
+              <span style={{ color: C.sage, fontWeight: 600, marginRight: 8 }}>{fmt(totalIngresos)}</span>
+              <span style={{ color: C.rose, fontSize: 16, transform: abreIngresos ? "rotate(90deg)" : "none", transition: "transform .2s" }}>›</span>
+            </button>
+            {abreIngresos && (ingresosEv.length === 0
+              ? <p style={{ ...st.hint, margin: "4px 0 8px" }}>No hay ingresos en este período.</p>
+              : <div>{ingresosEv.map(filaEvento)}</div>)}
           </div>
         </>
       )}
@@ -716,10 +679,40 @@ function DashboardProximos({ data }) {
 
 /* -------- Gráfica completa: ingresos vs gastos acumulados ------------- */
 function GraficaFlujo({ data, onClose }) {
-  const r = useMemo(() => calcProyeccionFlujo(data, BODA_ISO), [data]);
+  // arranca el 1° del mes actual (junio), igual que las barras del dashboard
+  const desdeISO = useMemo(() => { const n = new Date(todayISO() + "T00:00:00"); return new Date(n.getFullYear(), n.getMonth(), 1).toISOString().slice(0, 10); }, []);
+  const r = useMemo(() => calcProyeccionFlujo(data, { desdeISO, bodaISO: BODA_ISO }), [data, desdeISO]);
+  const svgRef = React.useRef(null);
 
-  const W = 320, H = 172, padL = 6, padR = 6, padT = 12, padB = 26;
+  const W = 340, H = 210, padL = 8, padR = 8, padT = 30, padB = 44;
   const innerW = W - padL - padR, innerH = H - padT - padB;
+
+  const descargar = () => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const xml = new XMLSerializer().serializeToString(svg);
+    const svg64 = "data:image/svg+xml;base64," + btoa(unescape(encodeURIComponent(xml)));
+    const img = new Image();
+    img.onload = () => {
+      const scale = 2;
+      const canvas = document.createElement("canvas");
+      canvas.width = W * scale; canvas.height = H * scale;
+      const ctx = canvas.getContext("2d");
+      ctx.scale(scale, scale);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, W, H);
+      ctx.drawImage(img, 0, 0, W, H);
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = "balance-caja-boda.png";
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+      }, "image/png");
+    };
+    img.src = svg64;
+  };
 
   let contenido;
   if (!r.hayDatos) {
@@ -731,7 +724,6 @@ function GraficaFlujo({ data, onClose }) {
     const linea = (key) => r.puntos.map((p, i) => `${i === 0 ? "M" : "L"}${X(p.fecha).toFixed(1)},${Y(p[key]).toFixed(1)}`).join(" ");
     const xBoda = X(r.bodaISO);
 
-    // marcas de meses en el eje X
     const marcas = [];
     {
       const d0 = new Date(r.minFecha + "T00:00:00");
@@ -746,7 +738,14 @@ function GraficaFlujo({ data, onClose }) {
 
     contenido = (
       <>
-        <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
+        <svg ref={svgRef} width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ display: "block", width: "100%", height: "auto", background: "#fff", borderRadius: 8 }}>
+          {/* título + leyenda embebidos (para la imagen exportada) */}
+          <text x={W / 2} y={16} fontSize="12" fontWeight="700" fill={C.wine} textAnchor="middle" fontFamily="sans-serif">Balance de caja · boda</text>
+          <circle cx={padL + 6} cy={25} r="4" fill={C.sage} />
+          <text x={padL + 14} y={28} fontSize="8" fill={C.wine} fontFamily="sans-serif">Ingresos acum.</text>
+          <circle cx={padL + 78} cy={25} r="4" fill={C.terra} />
+          <text x={padL + 86} y={28} fontSize="8" fill={C.wine} fontFamily="sans-serif">Gastos acum.</text>
+
           {/* grilla horizontal */}
           {[0.25, 0.5, 0.75, 1].map((q) => (
             <line key={q} x1={padL} y1={Y(maxY * q)} x2={W - padR} y2={Y(maxY * q)} stroke={C.line} strokeWidth="1" />
@@ -755,12 +754,12 @@ function GraficaFlujo({ data, onClose }) {
           {marcas.map((mk, i) => (
             <g key={i}>
               <line x1={mk.x} y1={padT} x2={mk.x} y2={padT + innerH} stroke={C.line} strokeWidth="0.5" opacity="0.5" />
-              <text x={mk.x} y={H - 8} fontSize="8" fill={C.wineSoft} textAnchor="middle" fontFamily="sans-serif">{mk.label}</text>
+              <text x={mk.x} y={H - 24} fontSize="8" fill={C.wineSoft} textAnchor="middle" fontFamily="sans-serif">{mk.label}</text>
             </g>
           ))}
           {/* línea fecha de boda */}
           <line x1={xBoda} y1={padT} x2={xBoda} y2={padT + innerH} stroke={C.gold} strokeWidth="1.5" strokeDasharray="3 3" />
-          <text x={Math.min(xBoda, W - 18)} y={padT + 2} fontSize="8" fill={C.gold} textAnchor="middle" fontFamily="sans-serif">💍</text>
+          <text x={Math.min(xBoda, W - 16)} y={padT - 2} fontSize="8" fill={C.gold} textAnchor="middle" fontFamily="sans-serif">boda</text>
           {/* curvas */}
           <path d={linea("gasto")} fill="none" stroke={C.terra} strokeWidth="2" strokeLinejoin="round" />
           <path d={linea("ingreso")} fill="none" stroke={C.sage} strokeWidth="2" strokeLinejoin="round" />
@@ -768,12 +767,10 @@ function GraficaFlujo({ data, onClose }) {
           {r.cruce && (
             <circle cx={X(r.cruce.fecha)} cy={Y(r.puntos.find((p) => p.fecha === r.cruce.fecha)?.gasto || 0)} r="4" fill={C.terra} stroke="#fff" strokeWidth="1.5" />
           )}
+          {/* eje x */}
+          <text x={padL} y={H - 8} fontSize="8" fill={C.wineSoft} fontFamily="sans-serif">{fmtFecha(r.minFecha)}</text>
+          <text x={W - padR} y={H - 8} fontSize="8" fill={C.wineSoft} textAnchor="end" fontFamily="sans-serif">{fmtFecha(r.maxFecha)}</text>
         </svg>
-
-        <div style={{ display: "flex", gap: 14, justifyContent: "center", fontSize: 12, fontFamily: F.body, color: C.wine, marginTop: 4 }}>
-          <span><span style={{ ...st.dashDot, background: C.sage }} /> Ingresos acum.</span>
-          <span><span style={{ ...st.dashDot, background: C.terra }} /> Gastos acum.</span>
-        </div>
 
         {/* alerta */}
         {r.cruce ? (
@@ -804,7 +801,8 @@ function GraficaFlujo({ data, onClose }) {
           <button style={st.iconBtn} onClick={onClose}>✕</button>
         </div>
         {contenido}
-        <div style={{ marginTop: 16, textAlign: "right" }}>
+        <div style={{ marginTop: 16, display: "flex", justifyContent: "space-between", gap: 8 }}>
+          {r.hayDatos ? <button style={st.btnSm} onClick={descargar}>⬇️ Descargar imagen</button> : <span />}
           <button style={st.btnGhost} onClick={onClose}>Cerrar</button>
         </div>
       </div>
@@ -1958,7 +1956,8 @@ const st = {
   dashLeyenda: { display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, color: C.wine, fontFamily: F.body, marginTop: 8, alignItems: "center" },
   dashDot: { display: "inline-block", width: 9, height: 9, borderRadius: 3, marginRight: 4, verticalAlign: "middle" },
   dashLimpiarFiltro: { background: "transparent", border: "none", color: C.rose, textDecoration: "underline", cursor: "pointer", fontFamily: F.body, fontSize: 12, padding: 0 },
-  dashGrupoTit: { fontFamily: F.body, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.wineSoft, marginBottom: 4 },
+  dashDesplegable: { display: "flex", alignItems: "center", width: "100%", background: "#fbf6f0", border: `1px solid ${C.line}`, borderRadius: 10, padding: "9px 12px", marginTop: 6, fontFamily: F.body, fontSize: 14, fontWeight: 600, color: C.wine, cursor: "pointer" },
+  dashConteo: { color: C.wineSoft, fontWeight: 400, fontSize: 12 },
   dashEvento: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: `1px solid ${C.line}77` },
   dashEventoDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
   dashEventoNombre: { fontFamily: F.body, fontSize: 14, color: C.wine, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "flex", alignItems: "center", gap: 6 },
