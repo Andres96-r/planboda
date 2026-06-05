@@ -593,6 +593,9 @@ function DashboardProximos({ data }) {
   const sufijo = mesSel ? MESES_ABR[Number(mesSel.slice(5)) - 1] : "total";
   const totalPagos = pagos.reduce((s, e) => s + e.monto, 0);
   const totalIngresos = ingresosEv.reduce((s, e) => s + e.monto, 0);
+  const netoPasados = pasados
+    ? pasados.reduce((s, e) => s + (e.tipo === "ingreso" ? e.monto : -e.monto), 0)
+    : 0;
 
   const filaEvento = (e, i) => (
     <div key={i} style={st.dashEvento}>
@@ -689,6 +692,7 @@ function DashboardProximos({ data }) {
               <>
                 <button style={st.dashDesplegable} onClick={() => setAbrePasados((v) => !v)}>
                   <span style={{ flex: 1, textAlign: "left" }}>🕓 Movimientos pasados <span style={st.dashConteo}>({pasados.length})</span></span>
+                  <span style={{ color: netoPasados >= 0 ? C.sage : C.terra, fontWeight: 600, marginRight: 8 }}>{netoPasados >= 0 ? "+" : "−"}{fmt(Math.abs(netoPasados))}</span>
                   <span style={{ color: C.rose, fontSize: 16, transform: abrePasados ? "rotate(90deg)" : "none", transition: "transform .2s" }}>›</span>
                 </button>
                 {abrePasados && (pasados.length === 0
