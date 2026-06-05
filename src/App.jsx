@@ -452,17 +452,30 @@ function CodigoModal({ onOk, onClose }) {
     <div style={{ ...st.overlay, zIndex: 85, alignItems: "center" }} onClick={onClose}>
       <div style={st.confirm} onClick={(e) => e.stopPropagation()}>
         <div style={{ fontSize: 26, marginBottom: 6 }}>🔒</div>
-        <p style={{ fontFamily: F.body, color: C.wine, fontSize: 15, margin: "0 0 12px" }}>Ingresá el código para mostrar los montos</p>
-        <input
-          type="password"
-          inputMode="numeric"
-          value={codigo}
-          autoFocus
-          onChange={(e) => { setCodigo(e.target.value); setError(false); }}
-          onKeyDown={(e) => { if (e.key === "Enter") intentar(); }}
-          style={{ ...st.input, textAlign: "center", letterSpacing: 6, fontSize: 18 }}
-          placeholder="••••••"
-        />
+        <p style={{ fontFamily: F.body, color: C.wine, fontSize: 15, margin: "0 0 14px" }}>Ingresá el código para mostrar los montos</p>
+        <div style={{ position: "relative" }}>
+          <input
+            type="text"
+            inputMode="numeric"
+            value={codigo}
+            autoFocus
+            onChange={(e) => { setCodigo(e.target.value.replace(/\D/g, "").slice(0, 6)); setError(false); }}
+            onKeyDown={(e) => { if (e.key === "Enter") intentar(); }}
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "text", border: "none" }}
+            aria-label="Código"
+          />
+          <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+            {Array.from({ length: 6 }).map((_, i) => {
+              const lleno = i < codigo.length;
+              const activo = i === codigo.length;
+              return (
+                <div key={i} style={{ width: 34, height: 44, borderRadius: 10, background: "#fff", border: `2px solid ${error ? C.terra : activo ? C.rose : lleno ? C.wineSoft : C.line}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, lineHeight: 1, color: C.wine }}>
+                  {lleno ? "•" : ""}
+                </div>
+              );
+            })}
+          </div>
+        </div>
         {error && <div style={{ color: C.terra, fontSize: 13, marginTop: 8, fontFamily: F.body }}>Código incorrecto</div>}
         <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
           <button style={{ ...st.btnGhost, flex: 1 }} onClick={onClose}>Cancelar</button>
