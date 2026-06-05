@@ -127,7 +127,6 @@ const mesKey = (y, m) => `${y}-${String(m + 1).padStart(2, "0")}`;
 
 function calcDashboard(data, hoyISO, nMeses = 6) {
   const now = new Date(hoyISO + "T00:00:00");
-  const monthStartISO = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
   const { ingresos, gastos } = recolectarEventos(data, BODA_ISO);
 
   // Barras mensuales: acumulado desde el inicio hasta el último día de cada mes
@@ -140,20 +139,7 @@ function calcDashboard(data, hoyISO, nMeses = 6) {
     meses.push({ key: mesKey(d.getFullYear(), d.getMonth()), label: MESES_ABR[d.getMonth()], anio: d.getFullYear(), ingreso, pago, balance: ingreso - pago });
   }
 
-  // Balance hasta hoy = todo lo cargado con fecha <= hoy
-  const balanceHoy = acumuladoHasta(ingresos, hoyISO) - acumuladoHasta(gastos, hoyISO);
-
-  // Agenda: pagos pendientes (cualquier fecha, marcando vencidos) + ingresos del mes en adelante
-  const eventos = [];
-  gastos.forEach((g) => {
-    if (g.pendiente) eventos.push({ fecha: g.fecha, tipo: "pago", nombre: g.nombre, monto: g.monto, cat: g.cat, vencida: g.fecha < hoyISO });
-  });
-  ingresos.forEach((i) => {
-    if (i.fecha >= monthStartISO) eventos.push({ fecha: i.fecha, tipo: "ingreso", nombre: i.nombre, monto: i.monto });
-  });
-  eventos.sort((a, b) => (a.fecha || "").localeCompare(b.fecha || ""));
-
-  return { balanceHoy, meses, eventos };
+  return { meses, ingresos, gastos };
 }
 
 /* ===================== Confirmación (contexto) ========================== */
@@ -568,19 +554,43 @@ function PanelResumen({ t, data }) {
 /* ---------------- Dashboard híbrido: próximos pagos/ingresos ----------- */
 function DashboardProximos({ data }) {
   const hoy = todayISO();
-  const [mesSel, setMesSel] = useState(null); // null = todos
+  const [mesSel, setMesSel] = useState(null); // null = todos (total)
   const [verGrafico, setVerGrafico] = useState(false);
-  const [abrePagos, setAbrePagos] = useState(true);
+  const [abrePagos, setAbrePagos] = useState(false);
   const [abreIngresos, setAbreIngresos] = useState(false);
-  const { balanceHoy, meses, eventos } = useMemo(() => calcDashboard(data, hoy, 6), [data, hoy]);
+  const [abrePasados, setAbrePasados] = useState(false);
+  const [fechaBalance, setFechaBalance] = useState(hoy);
+  const { meses, ingresos, gastos } = useMemo(() => calcDashboard(data, hoy, 6), [data, hoy]);
 
-  const hayDatos = eventos.length > 0 || meses.some((m) => m.ingreso || m.pago);
+  const hayDatos = ingresos.length > 0 || gastos.length > 0;
   const maxAbs = Math.max(1, ...meses.map((m) => Math.max(m.ingreso, m.pago)));
 
-  // filtro por mes seleccionado
-  const eventosFiltrados = mesSel ? eventos.filter((e) => (e.fecha || "").slice(0, 7) === mesSel) : eventos;
-  const pagos = eventosFiltrados.filter((e) => e.tipo === "pago");
-  const ingresosEv = eventosFiltrados.filter((e) => e.tipo === "ingreso");
+  // Balance a la fecha elegida
+  const balanceFecha = useMemo(
+    () => acumuladoHasta(ingresos, fechaBalance) - acumuladoHasta(gastos, fechaBalance),
+    [ingresos, gastos, fechaBalance]
+  );
+
+  // Mapas a "evento" para mostrar
+  const toPago = (g) => ({ tipo: "pago", nombre: g.nombre, monto: g.monto, cat: g.cat, fecha: g.fecha, vencida: g.fecha < hoy });
+  const toIngreso = (i) => ({ tipo: "ingreso", nombre: i.nombre, monto: i.monto, fecha: i.fecha });
+  const porFecha = (a, b) => (a.fecha || "").localeCompare(b.fecha || "");
+
+  // Listas según vista
+  let pagos, ingresosEv, pasados = null;
+  if (mesSel) {
+    const enMes = (f) => (f || "").slice(0, 7) === mesSel;
+    pagos = gastos.filter((g) => g.pendiente && enMes(g.fecha)).map(toPago).sort(porFecha);
+    ingresosEv = ingresos.filter((i) => enMes(i.fecha)).map(toIngreso).sort(porFecha);
+  } else {
+    pagos = gastos.filter((g) => g.pendiente).map(toPago).sort(porFecha);
+    ingresosEv = ingresos.filter((i) => i.fecha >= hoy).map(toIngreso).sort(porFecha);
+    pasados = [
+      ...gastos.filter((g) => !g.pendiente && g.fecha < hoy).map(toPago),
+      ...ingresos.filter((i) => i.fecha < hoy).map(toIngreso),
+    ].sort(porFecha);
+  }
+  const sufijo = mesSel ? MESES_ABR[Number(mesSel.slice(5)) - 1] : "total";
   const totalPagos = pagos.reduce((s, e) => s + e.monto, 0);
   const totalIngresos = ingresosEv.reduce((s, e) => s + e.monto, 0);
 
@@ -613,10 +623,13 @@ function DashboardProximos({ data }) {
         <p style={st.hint}>Cuando cargues pagos con fecha o ingresos futuros, vas a ver acá tu agenda y el balance proyectado mes a mes.</p>
       ) : (
         <>
-          {/* Balance hasta hoy */}
+          {/* Balance a la fecha elegida */}
           <div style={st.dashArrastre}>
-            <span style={{ fontFamily: F.body, fontSize: 12, color: C.wineSoft }}>Balance hasta la fecha {fmtFecha(hoy)}</span>
-            <span style={{ fontFamily: F.serif, fontSize: 20, fontWeight: 700, color: balanceHoy >= 0 ? C.sage : C.terra }}>{fmt(balanceHoy)}</span>
+            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              <span style={{ fontFamily: F.body, fontSize: 12, color: C.wineSoft }}>Balance hasta la fecha</span>
+              <input type="date" value={fechaBalance} onChange={(e) => setFechaBalance(e.target.value || hoy)} style={st.dashFechaInput} />
+            </div>
+            <span style={{ fontFamily: F.serif, fontSize: 22, fontWeight: 700, color: balanceFecha >= 0 ? C.sage : C.terra }}>{fmt(balanceFecha)}</span>
           </div>
 
           {/* Tira de meses (acumulado hasta fin de cada mes) */}
@@ -645,16 +658,16 @@ function DashboardProximos({ data }) {
             <span style={{ color: C.wineSoft }}>· abajo: balance</span>
           </div>
 
-          {/* Agenda desplegable: pagos / ingresos */}
+          {/* Agenda desplegable */}
           <div style={{ marginTop: 10 }}>
             {mesSel && (
-              <div style={{ fontSize: 12, color: C.rose, fontFamily: F.body, marginBottom: 8 }}>
-                Filtrando {MESES_ABR[Number(mesSel.slice(5)) - 1]} · <button style={st.dashLimpiarFiltro} onClick={() => setMesSel(null)}>ver todo</button>
+              <div style={{ marginBottom: 8 }}>
+                <button style={st.dashVerTodo} onClick={() => setMesSel(null)}>← Ver todo</button>
               </div>
             )}
 
             <button style={st.dashDesplegable} onClick={() => setAbrePagos((v) => !v)}>
-              <span style={{ flex: 1, textAlign: "left" }}>💸 Pagos próximos <span style={st.dashConteo}>({pagos.length})</span></span>
+              <span style={{ flex: 1, textAlign: "left" }}>💸 Pagos próximos <span style={st.dashConteo}>({sufijo})</span></span>
               <span style={{ color: C.terra, fontWeight: 600, marginRight: 8 }}>{fmt(totalPagos)}</span>
               <span style={{ color: C.rose, fontSize: 16, transform: abrePagos ? "rotate(90deg)" : "none", transition: "transform .2s" }}>›</span>
             </button>
@@ -663,13 +676,26 @@ function DashboardProximos({ data }) {
               : <div style={{ marginBottom: 8 }}>{pagos.map(filaEvento)}</div>)}
 
             <button style={st.dashDesplegable} onClick={() => setAbreIngresos((v) => !v)}>
-              <span style={{ flex: 1, textAlign: "left" }}>💰 Ingresos próximos <span style={st.dashConteo}>({ingresosEv.length})</span></span>
+              <span style={{ flex: 1, textAlign: "left" }}>💰 Ingresos próximos <span style={st.dashConteo}>({sufijo})</span></span>
               <span style={{ color: C.sage, fontWeight: 600, marginRight: 8 }}>{fmt(totalIngresos)}</span>
               <span style={{ color: C.rose, fontSize: 16, transform: abreIngresos ? "rotate(90deg)" : "none", transition: "transform .2s" }}>›</span>
             </button>
             {abreIngresos && (ingresosEv.length === 0
               ? <p style={{ ...st.hint, margin: "4px 0 8px" }}>No hay ingresos en este período.</p>
               : <div>{ingresosEv.map(filaEvento)}</div>)}
+
+            {/* Movimientos pasados (solo en vista total) */}
+            {pasados && (
+              <>
+                <button style={st.dashDesplegable} onClick={() => setAbrePasados((v) => !v)}>
+                  <span style={{ flex: 1, textAlign: "left" }}>🕓 Movimientos pasados <span style={st.dashConteo}>({pasados.length})</span></span>
+                  <span style={{ color: C.rose, fontSize: 16, transform: abrePasados ? "rotate(90deg)" : "none", transition: "transform .2s" }}>›</span>
+                </button>
+                {abrePasados && (pasados.length === 0
+                  ? <p style={{ ...st.hint, margin: "4px 0 8px" }}>Todavía no hay movimientos registrados con fecha pasada.</p>
+                  : <div>{pasados.map(filaEvento)}</div>)}
+              </>
+            )}
           </div>
         </>
       )}
@@ -1955,7 +1981,8 @@ const st = {
   dashMesNeto: { fontFamily: F.body, fontSize: 9.5, fontWeight: 600 },
   dashLeyenda: { display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, color: C.wine, fontFamily: F.body, marginTop: 8, alignItems: "center" },
   dashDot: { display: "inline-block", width: 9, height: 9, borderRadius: 3, marginRight: 4, verticalAlign: "middle" },
-  dashLimpiarFiltro: { background: "transparent", border: "none", color: C.rose, textDecoration: "underline", cursor: "pointer", fontFamily: F.body, fontSize: 12, padding: 0 },
+  dashVerTodo: { background: "#fff", border: `1px solid ${C.rose}`, color: C.wine, borderRadius: 20, padding: "6px 14px", fontFamily: F.body, fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  dashFechaInput: { border: `1px solid ${C.line}`, borderRadius: 8, padding: "3px 8px", fontFamily: F.body, fontSize: 13, color: C.wine, background: "#fff", outline: "none" },
   dashDesplegable: { display: "flex", alignItems: "center", width: "100%", background: "#fbf6f0", border: `1px solid ${C.line}`, borderRadius: 10, padding: "9px 12px", marginTop: 6, fontFamily: F.body, fontSize: 14, fontWeight: 600, color: C.wine, cursor: "pointer" },
   dashConteo: { color: C.wineSoft, fontWeight: 400, fontSize: 12 },
   dashEvento: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: `1px solid ${C.line}77` },
