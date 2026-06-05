@@ -120,6 +120,78 @@ function generarCuotas(costo, cantidad, fechaInicio, previas = []) {
   return arr;
 }
 
+/* ----------------- Dashboard: próximos pagos e ingresos ---------------- */
+const MESES_ABR = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+const mesKey = (y, m) => `${y}-${String(m + 1).padStart(2, "0")}`;
+
+function calcDashboard(data, hoyISO, nMeses = 6) {
+  const now = new Date(hoyISO + "T00:00:00");
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthStartISO = monthStart.toISOString().slice(0, 10);
+  const finVentanaISO = new Date(now.getFullYear(), now.getMonth() + nMeses, 1).toISOString().slice(0, 10);
+
+  const meses = [];
+  for (let i = 0; i < nMeses; i++) {
+    const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+    meses.push({ key: mesKey(d.getFullYear(), d.getMonth()), label: MESES_ABR[d.getMonth()], anio: d.getFullYear(), ingreso: 0, pago: 0 });
+  }
+  const idxMes = (iso) => meses.findIndex((mm) => mm.key === (iso || "").slice(0, 7));
+
+  const eventos = [];
+  let inflowsBefore = 0, outflowsBefore = 0;
+
+  (data.ahorros || []).forEach((a) => {
+    const monto = +a.monto || 0;
+    if ((a.fecha || "") < monthStartISO) { inflowsBefore += monto; return; }
+    const ix = idxMes(a.fecha);
+    if (ix >= 0) meses[ix].ingreso += monto;
+    if (a.fecha < finVentanaISO) eventos.push({ fecha: a.fecha, tipo: "ingreso", nombre: a.descripcion || "Ahorro", monto });
+  });
+  (data.ingresos || []).forEach((i) => {
+    const monto = +i.monto || 0;
+    if ((i.fecha || "") < monthStartISO) { inflowsBefore += monto; return; }
+    const ix = idxMes(i.fecha);
+    if (ix >= 0) meses[ix].ingreso += monto;
+    if (i.fecha < finVentanaISO) eventos.push({ fecha: i.fecha, tipo: "ingreso", nombre: i.descripcion || "Ingreso", monto });
+  });
+
+  (data.categorias || []).forEach((cat) => {
+    (cat.items || []).forEach((it) => {
+      if (it.modalidad === "cuotas") {
+        (it.cuotas || []).forEach((q) => {
+          const monto = +q.monto || 0;
+          if (q.pagada) {
+            if ((q.fechaPago || q.fechaVencimiento || "") < monthStartISO) outflowsBefore += monto;
+            return;
+          }
+          const vencida = q.fechaVencimiento < monthStartISO;
+          const ix = vencida ? 0 : idxMes(q.fechaVencimiento);
+          if (ix >= 0) meses[ix].pago += monto;
+          if (vencida || q.fechaVencimiento < finVentanaISO)
+            eventos.push({ fecha: q.fechaVencimiento, tipo: "pago", nombre: `${it.nombre} · cuota`, monto, cat: cat.nombre, vencida });
+        });
+      } else {
+        (it.pagos || []).forEach((p) => { if ((p.fecha || "") < monthStartISO) outflowsBefore += +p.monto || 0; });
+        const c = calcItem(it);
+        if (c.pendiente > 0 && it.fechaLimite) {
+          const vencida = it.fechaLimite < monthStartISO;
+          const ix = vencida ? 0 : idxMes(it.fechaLimite);
+          if (ix >= 0) meses[ix].pago += c.pendiente;
+          if (vencida || it.fechaLimite < finVentanaISO)
+            eventos.push({ fecha: it.fechaLimite, tipo: "pago", nombre: it.nombre, monto: c.pendiente, cat: cat.nombre, vencida });
+        }
+      }
+    });
+  });
+
+  const carryOver = inflowsBefore - outflowsBefore;
+  let running = carryOver;
+  meses.forEach((mm) => { mm.neto = mm.ingreso - mm.pago; running += mm.neto; mm.balance = running; });
+
+  eventos.sort((a, b) => (a.fecha || "").localeCompare(b.fecha || ""));
+  return { carryOver, meses, eventos };
+}
+
 /* ===================== Confirmación (contexto) ========================== */
 const ConfirmCtx = createContext(() => Promise.resolve(true));
 const useConfirm = () => useContext(ConfirmCtx);
@@ -520,12 +592,121 @@ function PanelResumen({ t, data }) {
         )}
       </section>
 
+      <DashboardProximos data={data} />
+
       <div style={{ textAlign: "center", marginTop: 18 }}>
         <div style={{ fontSize: 11, color: C.wineSoft, fontFamily: F.body }}>PlanBoda {APP_VERSION} · datos en la nube (compartido)</div>
       </div>
     </div>
   );
 }
+
+/* ---------------- Dashboard híbrido: próximos pagos/ingresos ----------- */
+function DashboardProximos({ data }) {
+  const hoy = todayISO();
+  const [mesSel, setMesSel] = useState(null); // null = todos
+  const { carryOver, meses, eventos } = useMemo(() => calcDashboard(data, hoy, 6), [data, hoy]);
+
+  const hayDatos = eventos.length > 0 || meses.some((m) => m.ingreso || m.pago);
+  const maxAbs = Math.max(1, ...meses.map((m) => Math.max(m.ingreso, m.pago)));
+
+  // filtro por mes seleccionado
+  const eventosFiltrados = mesSel ? eventos.filter((e) => (e.fecha || "").slice(0, 7) === mesSel) : eventos;
+
+  // agrupar agenda por tramo
+  const finSemanaISO = new Date(new Date(hoy + "T00:00:00").getTime() + 7 * 86400000).toISOString().slice(0, 10);
+  const finMesISO = (() => { const d = new Date(hoy + "T00:00:00"); return new Date(d.getFullYear(), d.getMonth() + 1, 1).toISOString().slice(0, 10); })();
+  const grupos = [
+    { titulo: "Esta semana", items: [] },
+    { titulo: "Resto del mes", items: [] },
+    { titulo: "Próximos meses", items: [] },
+  ];
+  eventosFiltrados.forEach((e) => {
+    if (e.fecha < finSemanaISO || e.vencida) grupos[0].items.push(e);
+    else if (e.fecha < finMesISO) grupos[1].items.push(e);
+    else grupos[2].items.push(e);
+  });
+
+  return (
+    <section style={{ ...st.panel, marginTop: 14 }}>
+      <h2 style={st.h2}>Próximos pagos e ingresos</h2>
+
+      {!hayDatos ? (
+        <p style={st.hint}>Cuando cargues pagos con fecha o ingresos futuros, vas a ver acá tu agenda y el balance proyectado mes a mes.</p>
+      ) : (
+        <>
+          {/* Saldo de arrastre */}
+          <div style={st.dashArrastre}>
+            <span style={{ fontFamily: F.body, fontSize: 12, color: C.wineSoft }}>Balance al inicio del mes</span>
+            <span style={{ fontFamily: F.serif, fontSize: 20, fontWeight: 700, color: carryOver >= 0 ? C.sage : C.terra }}>{fmt(carryOver)}</span>
+          </div>
+
+          {/* Tira de meses */}
+          <div style={st.dashMesesWrap}>
+            {meses.map((m) => {
+              const on = mesSel === m.key;
+              return (
+                <button
+                  key={m.key}
+                  onClick={() => setMesSel(on ? null : m.key)}
+                  style={{ ...st.dashMes, ...(on ? st.dashMesOn : {}) }}
+                >
+                  <div style={st.dashMesLabel}>{m.label}</div>
+                  <div style={st.dashMesBarras}>
+                    <div style={{ ...st.dashBar, height: `${(m.ingreso / maxAbs) * 100}%`, background: C.sage }} title={`Ingresos ${fmt(m.ingreso)}`} />
+                    <div style={{ ...st.dashBar, height: `${(m.pago / maxAbs) * 100}%`, background: C.terra }} title={`Pagos ${fmt(m.pago)}`} />
+                  </div>
+                  <div style={{ ...st.dashMesNeto, color: m.balance >= 0 ? C.sage : C.terra }}>{fmt(m.balance)}</div>
+                </button>
+              );
+            })}
+          </div>
+          <div style={st.dashLeyenda}>
+            <span><span style={{ ...st.dashDot, background: C.sage }} /> Ingresos</span>
+            <span><span style={{ ...st.dashDot, background: C.terra }} /> Pagos</span>
+            <span style={{ color: C.wineSoft }}>· abajo: balance acumulado</span>
+          </div>
+
+          {/* Agenda */}
+          <div style={{ marginTop: 6 }}>
+            {mesSel && (
+              <div style={{ fontSize: 12, color: C.rose, fontFamily: F.body, marginBottom: 6 }}>
+                Filtrando {MESES_ABR[Number(mesSel.slice(5)) - 1]} · <button style={st.dashLimpiarFiltro} onClick={() => setMesSel(null)}>ver todo</button>
+              </div>
+            )}
+            {grupos.every((g) => g.items.length === 0) ? (
+              <p style={st.hint}>No hay vencimientos ni ingresos en este período.</p>
+            ) : (
+              grupos.map((g) =>
+                g.items.length === 0 ? null : (
+                  <div key={g.titulo} style={{ marginTop: 10 }}>
+                    <div style={st.dashGrupoTit}>{g.titulo}</div>
+                    {g.items.map((e, i) => (
+                      <div key={i} style={st.dashEvento}>
+                        <span style={{ ...st.dashEventoDot, background: e.tipo === "ingreso" ? C.sage : e.vencida ? C.terra : C.rose }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={st.dashEventoNombre}>
+                            {e.nombre}
+                            {e.vencida && <span style={st.dashVencida}>vencido</span>}
+                          </div>
+                          <div style={st.dashEventoFecha}>{e.tipo === "ingreso" ? "Ingreso" : e.cat ? e.cat : "Pago"} · {fmtFecha(e.fecha)}</div>
+                        </div>
+                        <span style={{ fontFamily: F.serif, fontWeight: 600, fontSize: 15, color: e.tipo === "ingreso" ? C.sage : C.terra }}>
+                          {e.tipo === "ingreso" ? "+" : "−"}{fmt(e.monto)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )
+              )
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 function Mini({ label, val, color, strong }) {
   return (
     <div style={{ textAlign: "center", flex: 1, minWidth: 110 }}>
@@ -577,9 +758,41 @@ function LegendRow({ color, label, val, bold }) {
 }
 
 /* =========================== PANEL · GASTOS ============================= */
+const ORDEN_GASTOS_KEY = "planboda:ordenGastos";
+const ORDENES_GASTOS = [
+  { id: "default", label: "Por defecto" },
+  { id: "nombre", label: "Nombre A-Z" },
+  { id: "costoDesc", label: "Mayor costo" },
+  { id: "pendienteDesc", label: "Más pendiente" },
+  { id: "pagadoDesc", label: "Más pagado" },
+];
+
+function totalesCat(cat) {
+  return (cat.items || []).reduce(
+    (a, it) => { const c = calcItem(it); a.costo += c.costo; a.pagado += c.pagado; a.pendiente += c.pendiente; return a; },
+    { costo: 0, pagado: 0, pendiente: 0 }
+  );
+}
+
 function PanelGastos({ data, update, fechaRef }) {
   const confirm = useConfirm();
   const [modalCat, setModalCat] = useState(null);
+  const [ordenGastos, setOrdenGastos] = useState(() => {
+    try { return localStorage.getItem(ORDEN_GASTOS_KEY) || "default"; } catch { return "default"; }
+  });
+  const cambiarOrden = (id) => { setOrdenGastos(id); try { localStorage.setItem(ORDEN_GASTOS_KEY, id); } catch {} };
+
+  const categoriasOrdenadas = (() => {
+    const arr = data.categorias.map((cat) => ({ cat, tot: totalesCat(cat) }));
+    switch (ordenGastos) {
+      case "nombre": arr.sort((a, b) => (a.cat.nombre || "").localeCompare(b.cat.nombre || "")); break;
+      case "costoDesc": arr.sort((a, b) => b.tot.costo - a.tot.costo); break;
+      case "pendienteDesc": arr.sort((a, b) => b.tot.pendiente - a.tot.pendiente); break;
+      case "pagadoDesc": arr.sort((a, b) => b.tot.pagado - a.tot.pagado); break;
+      default: break;
+    }
+    return arr.map((x) => x.cat);
+  })();
 
   const guardarCat = async ({ nombre, emoji, items }) => {
     const catId = modalCat?.cat?.id;
@@ -613,13 +826,24 @@ function PanelGastos({ data, update, fechaRef }) {
         {data.categorias.length === 0 && <button style={st.btnGhost} onClick={sugeridas}>+ Sugeridas</button>}
       </div>
 
+      {data.categorias.length > 1 && (
+        <div style={st.ordenGastosWrap}>
+          <span style={{ fontSize: 12, color: C.wineSoft, fontFamily: F.body, flexShrink: 0 }}>Ordenar:</span>
+          <div style={st.ordenChips}>
+            {ORDENES_GASTOS.map((o) => (
+              <button key={o.id} onClick={() => cambiarOrden(o.id)} style={ordenGastos === o.id ? st.ordenChipOn : st.ordenChip}>{o.label}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {data.categorias.length === 0 && (
         <div style={st.empty}>
           Todavía no cargaste nada. Tocá <strong>+ Categoría</strong> abajo (ej. <em>Novia</em>) y después agregale ítems (vestido, maquillaje, zapatos…).
         </div>
       )}
 
-      {data.categorias.map((cat) => (
+      {categoriasOrdenadas.map((cat) => (
         <Categoria key={cat.id} cat={cat} update={update} fechaRef={fechaRef} onEditar={() => setModalCat({ cat })} />
       ))}
 
@@ -850,12 +1074,23 @@ function Metric({ label, val, color }) {
 }
 
 /* ========================== PANEL · NOTAS ============================== */
-function NotaItem({ n, onVer, onBorrar, onToggleHecha }) {
+const estadoRecordatorio = (n, hoy) => {
+  if (n.tipo !== "recordatorio" || !n.recordatorioFecha) return null;
+  const d = diasEntre(n.recordatorioFecha, hoy);
+  if (d < 0) return { txt: `Venció hace ${Math.abs(d)} d`, color: C.terra, urgente: true };
+  if (d === 0) return { txt: "¡Es hoy!", color: C.terra, urgente: true };
+  if (d <= 7) return { txt: `En ${d} día(s)`, color: C.gold, urgente: false };
+  return { txt: fmtFecha(n.recordatorioFecha), color: C.wineSoft, urgente: false };
+};
+
+function NotaItem({ n, onVer, onBorrar, onToggleHecha, modoOrden, onSubir, onBajar, esPrimera, esUltima }) {
   const pressTimer = React.useRef(null);
   const [presionando, setPresionando] = useState(false);
   const hecha = !!n.hecha;
+  const rec = estadoRecordatorio(n, todayISO());
 
   const iniciarPress = (e) => {
+    if (modoOrden) return;
     e.preventDefault();
     setPresionando(true);
     pressTimer.current = setTimeout(() => {
@@ -863,7 +1098,6 @@ function NotaItem({ n, onVer, onBorrar, onToggleHecha }) {
       onToggleHecha(n.id, !hecha);
     }, 3000);
   };
-
   const cancelarPress = () => {
     setPresionando(false);
     if (pressTimer.current) { clearTimeout(pressTimer.current); pressTimer.current = null; }
@@ -874,40 +1108,58 @@ function NotaItem({ n, onVer, onBorrar, onToggleHecha }) {
       style={{
         ...st.notaItem,
         ...(hecha ? st.notaItemHecha : {}),
+        ...(rec?.urgente && !hecha ? { borderColor: C.terra, background: "#fff6f1" } : {}),
         ...(presionando ? { opacity: 0.7, transform: "scale(0.98)" } : {}),
-        userSelect: "none",
-        WebkitUserSelect: "none",
+        userSelect: "none", WebkitUserSelect: "none",
         transition: "opacity .15s, transform .15s",
       }}
       onPointerDown={iniciarPress}
       onPointerUp={cancelarPress}
       onPointerLeave={cancelarPress}
       onPointerCancel={cancelarPress}
-      onClick={() => onVer(n)}
+      onClick={() => { if (!modoOrden) onVer(n); }}
     >
       {presionando && (
         <div style={st.notaProgress}>
           <div style={{ ...st.notaProgressBar, animation: "notaPress 3s linear forwards" }} />
         </div>
       )}
-      <span style={{ ...st.notaItemTitulo, ...(hecha ? st.notaItemTituloHecha : {}) }}>
-        {n.titulo || <em style={{ color: C.wineSoft }}>Sin título</em>}
-      </span>
+      {n.tipo === "recordatorio" && <span style={{ fontSize: 13, flexShrink: 0 }}>⏰</span>}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <span style={{ ...st.notaItemTitulo, ...(hecha ? st.notaItemTituloHecha : {}) }}>
+          {n.titulo || <em style={{ color: C.wineSoft }}>Sin título</em>}
+        </span>
+        {rec && !hecha && <div style={{ fontSize: 11, color: rec.color, fontFamily: F.body, fontWeight: 600 }}>{rec.txt}</div>}
+      </div>
       {hecha && <span style={st.notaCheckBadge}>✓</span>}
-      <button
-        style={st.notaBorrarBtn}
-        onPointerDown={(e) => e.stopPropagation()}
-        onClick={(e) => { e.stopPropagation(); onBorrar(n.id); }}
-        title="Eliminar"
-      >✕</button>
+
+      {modoOrden ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
+          <button style={{ ...st.notaOrdenBtn, opacity: esPrimera ? 0.3 : 1 }} disabled={esPrimera} onClick={(e) => { e.stopPropagation(); onSubir(n.id); }}>▲</button>
+          <button style={{ ...st.notaOrdenBtn, opacity: esUltima ? 0.3 : 1 }} disabled={esUltima} onClick={(e) => { e.stopPropagation(); onBajar(n.id); }}>▼</button>
+        </div>
+      ) : (
+        <button
+          style={st.notaBorrarBtn}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); onBorrar(n.id); }}
+          title="Eliminar"
+        >✕</button>
+      )}
     </div>
   );
 }
+
+const ORDEN_NOTAS_KEY = "planboda:ordenNotas";
+const leerOrden = () => { try { return JSON.parse(localStorage.getItem(ORDEN_NOTAS_KEY)) || []; } catch { return []; } };
+const guardarOrden = (arr) => { try { localStorage.setItem(ORDEN_NOTAS_KEY, JSON.stringify(arr)); } catch {} };
 
 function PanelNotas({ data, update }) {
   const confirm = useConfirm();
   const [modalVer, setModalVer] = useState(null);
   const [modalNueva, setModalNueva] = useState(false);
+  const [modoOrden, setModoOrden] = useState(false);
+  const [orden, setOrden] = useState(() => leerOrden());
   const notas = data.notas || [];
 
   const borrarNota = async (id) => {
@@ -923,22 +1175,49 @@ function PanelNotas({ data, update }) {
     });
   };
 
-  const guardarNota = async ({ titulo, descripcion }) => {
+  const guardarNota = async ({ titulo, descripcion, tipo, recordatorioFecha }) => {
     if (!titulo.trim() && !descripcion.trim()) return;
     if (!(await confirm("¿Guardar la nota?"))) return;
+    const nuevoId = uid();
     update((d) => {
-      d.notas = [{ id: uid(), titulo: titulo.trim(), descripcion: descripcion.trim(), fecha: todayISO(), hecha: false }, ...(d.notas || [])];
+      d.notas = [{ id: nuevoId, titulo: titulo.trim(), descripcion: descripcion.trim(), fecha: todayISO(), hecha: false, tipo, recordatorioFecha: tipo === "recordatorio" ? recordatorioFecha : null }, ...(d.notas || [])];
       return d;
     });
+    const nuevoOrden = [nuevoId, ...orden];
+    setOrden(nuevoOrden); guardarOrden(nuevoOrden);
     setModalNueva(false);
   };
 
-  const pendientes = notas.filter((n) => !n.hecha);
+  // ordenar pendientes según orden local del celular
+  const pendientesRaw = notas.filter((n) => !n.hecha);
+  const pendientes = [...pendientesRaw].sort((a, b) => {
+    const ia = orden.indexOf(a.id), ib = orden.indexOf(b.id);
+    if (ia === -1 && ib === -1) return 0;
+    if (ia === -1) return -1; // nuevas (sin orden) arriba
+    if (ib === -1) return 1;
+    return ia - ib;
+  });
   const hechas = notas.filter((n) => n.hecha);
+
+  const mover = (id, dir) => {
+    const ids = pendientes.map((n) => n.id);
+    const i = ids.indexOf(id);
+    const j = i + dir;
+    if (j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    setOrden(ids); guardarOrden(ids);
+  };
 
   return (
     <div>
-      <p style={{ ...st.hint, marginBottom: 12 }}>Tocá para ver · Mantené 3 seg para marcar como lista</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 8 }}>
+        <p style={{ ...st.hint, margin: 0, flex: 1 }}>
+          {modoOrden ? "Usá ▲▼ para reordenar (orden propio de este celular)" : "Tocá para ver · Mantené 3 seg para marcar como lista"}
+        </p>
+        {pendientes.length > 1 && (
+          <button style={st.btnGhostSm} onClick={() => setModoOrden((v) => !v)}>{modoOrden ? "✓ Listo" : "↕ Ordenar"}</button>
+        )}
+      </div>
 
       {notas.length === 0 && (
         <div style={st.empty}>Todavía no hay notas. Tocá <strong>+ Nota</strong> para agregar la primera.</div>
@@ -946,13 +1225,18 @@ function PanelNotas({ data, update }) {
 
       {pendientes.length > 0 && (
         <div style={st.notaLista}>
-          {pendientes.map((n) => (
-            <NotaItem key={n.id} n={n} onVer={setModalVer} onBorrar={borrarNota} onToggleHecha={toggleHecha} />
+          {pendientes.map((n, i) => (
+            <NotaItem
+              key={n.id} n={n} onVer={setModalVer} onBorrar={borrarNota} onToggleHecha={toggleHecha}
+              modoOrden={modoOrden}
+              onSubir={(id) => mover(id, -1)} onBajar={(id) => mover(id, 1)}
+              esPrimera={i === 0} esUltima={i === pendientes.length - 1}
+            />
           ))}
         </div>
       )}
 
-      {hechas.length > 0 && (
+      {hechas.length > 0 && !modoOrden && (
         <>
           <div style={{ fontSize: 11, color: C.wineSoft, fontFamily: F.body, margin: "14px 0 6px", letterSpacing: 1, textTransform: "uppercase" }}>Listas ✓</div>
           <div style={st.notaLista}>
@@ -963,7 +1247,7 @@ function PanelNotas({ data, update }) {
         </>
       )}
 
-      <button style={st.fab} onClick={() => setModalNueva(true)}>+ Nota</button>
+      {!modoOrden && <button style={st.fab} onClick={() => setModalNueva(true)}>+ Nota</button>}
 
       {modalVer && <ModalVerNota nota={modalVer} onClose={() => setModalVer(null)} />}
 
@@ -999,7 +1283,11 @@ function ModalVerNota({ nota, onClose }) {
               <div style={st.cuadernilloTitulo}>{nota.titulo || <em>Sin título</em>}</div>
               <button style={{ ...st.iconBtn, color: C.wineSoft, fontSize: 18 }} onClick={onClose}>✕</button>
             </div>
-            <div style={st.cuadernilloFecha}>{fmtFecha(nota.fecha)}</div>
+            <div style={st.cuadernilloFecha}>
+              {nota.tipo === "recordatorio" && nota.recordatorioFecha
+                ? `⏰ Recordatorio · ${fmtFecha(nota.recordatorioFecha)}`
+                : `Creada el ${fmtFecha(nota.fecha)}`}
+            </div>
             <p style={st.cuadernilloTexto}>
               {nota.descripcion || <em style={{ color: "#b5966a" }}>Sin descripción.</em>}
             </p>
@@ -1013,18 +1301,38 @@ function ModalVerNota({ nota, onClose }) {
 function ModalNuevaNota({ onClose, onSave }) {
   const [titulo, setTitulo] = useState("");
   const [descripcion, setDescripcion] = useState("");
+  const [tipo, setTipo] = useState("nota");
+  const [recordatorioFecha, setRecordatorioFecha] = useState(todayISO());
+  const hoy = todayISO();
+  const fechaPasada = tipo === "recordatorio" && recordatorioFecha < hoy;
+
+  const puedeGuardar = (titulo.trim() || descripcion.trim()) && !(tipo === "recordatorio" && (!recordatorioFecha || fechaPasada));
+
   return (
     <>
+      <Campo label="Tipo">
+        <div style={{ display: "flex", gap: 8 }}>
+          {[["nota", "📝 Nota"], ["recordatorio", "⏰ Recordatorio"]].map(([v, tx]) => (
+            <button key={v} onClick={() => setTipo(v)} style={tipo === v ? st.toggleOn : st.toggleOff}>{tx}</button>
+          ))}
+        </div>
+      </Campo>
       <Campo label="Título"><input style={st.input} value={titulo} autoFocus placeholder="Ej. Pendiente con el salón…" onChange={(e) => setTitulo(e.target.value)} /></Campo>
+      {tipo === "recordatorio" && (
+        <Campo label="Fecha del recordatorio">
+          <input style={st.input} type="date" min={hoy} value={recordatorioFecha} onChange={(e) => setRecordatorioFecha(e.target.value)} />
+          {fechaPasada && <div style={{ fontSize: 12, color: C.terra, marginTop: 4 }}>No se pueden cargar fechas pasadas.</div>}
+        </Campo>
+      )}
       <Campo label="Descripción">
         <textarea
-          style={{ ...st.input, minHeight: 110, resize: "vertical", lineHeight: 1.5 }}
+          style={{ ...st.input, minHeight: 100, resize: "vertical", lineHeight: 1.5 }}
           value={descripcion}
           placeholder="Escribí los detalles acá…"
           onChange={(e) => setDescripcion(e.target.value)}
         />
       </Campo>
-      <Acciones onClose={onClose} ok={() => onSave({ titulo, descripcion })} />
+      <Acciones onClose={onClose} ok={() => { if (puedeGuardar) onSave({ titulo, descripcion, tipo, recordatorioFecha }); }} />
     </>
   );
 }
@@ -1579,6 +1887,31 @@ const st = {
   toggleOnSm: { flex: 1, background: C.wine, color: "#fff", border: "none", borderRadius: 20, padding: "6px 0", fontFamily: F.body, cursor: "pointer", fontSize: 12 },
   toggleOffSm: { flex: 1, background: "transparent", color: C.wine, border: `1px solid ${C.rose}`, borderRadius: 20, padding: "6px 0", fontFamily: F.body, cursor: "pointer", fontSize: 12 },
 
+  /* ---- Orden gastos ---- */
+  ordenGastosWrap: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12 },
+  ordenChips: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2 },
+  ordenChip: { background: "transparent", border: `1px solid ${C.line}`, color: C.wineSoft, borderRadius: 20, padding: "5px 12px", fontFamily: F.body, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 },
+  ordenChipOn: { background: C.wine, border: `1px solid ${C.wine}`, color: "#fff", borderRadius: 20, padding: "5px 12px", fontFamily: F.body, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0, fontWeight: 600 },
+
+  /* ---- Dashboard próximos ---- */
+  dashArrastre: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fbf6f0", border: `1px solid ${C.line}`, borderRadius: 12, padding: "10px 14px", marginBottom: 12 },
+  dashMesesWrap: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4 },
+  dashMes: { flex: "1 0 52px", minWidth: 52, background: "transparent", border: `1px solid ${C.line}`, borderRadius: 12, padding: "6px 4px", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 4 },
+  dashMesOn: { borderColor: C.rose, background: `${C.roseLite}44`, boxShadow: `0 0 0 1px ${C.rose}` },
+  dashMesLabel: { fontFamily: F.body, fontSize: 12, fontWeight: 600, color: C.wine },
+  dashMesBarras: { display: "flex", alignItems: "flex-end", justifyContent: "center", gap: 3, height: 40, width: "100%" },
+  dashBar: { width: 9, minHeight: 2, borderRadius: "3px 3px 0 0", transition: "height .4s ease" },
+  dashMesNeto: { fontFamily: F.body, fontSize: 9.5, fontWeight: 600 },
+  dashLeyenda: { display: "flex", gap: 12, flexWrap: "wrap", fontSize: 11, color: C.wine, fontFamily: F.body, marginTop: 8, alignItems: "center" },
+  dashDot: { display: "inline-block", width: 9, height: 9, borderRadius: 3, marginRight: 4, verticalAlign: "middle" },
+  dashLimpiarFiltro: { background: "transparent", border: "none", color: C.rose, textDecoration: "underline", cursor: "pointer", fontFamily: F.body, fontSize: 12, padding: 0 },
+  dashGrupoTit: { fontFamily: F.body, fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.wineSoft, marginBottom: 4 },
+  dashEvento: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: `1px solid ${C.line}77` },
+  dashEventoDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
+  dashEventoNombre: { fontFamily: F.body, fontSize: 14, color: C.wine, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "flex", alignItems: "center", gap: 6 },
+  dashVencida: { fontSize: 9, background: C.terra, color: "#fff", padding: "1px 6px", borderRadius: 10, fontWeight: 600, flexShrink: 0 },
+  dashEventoFecha: { fontSize: 11, color: C.wineSoft, marginTop: 1 },
+
   /* ---- Atajo panel tarjetas ---- */
   atajoBtnWrap: { display: "flex", alignItems: "center", gap: 10, background: `linear-gradient(100deg, ${C.ivory2}, #fff8f2)`, border: `1px solid ${C.roseLite}`, borderRadius: 14, padding: "11px 14px", marginBottom: 14, textDecoration: "none", color: C.wine, boxShadow: "0 2px 8px #7a2e3f0d", transition: "box-shadow .18s, transform .18s" },
   atajoEmojis: { fontSize: 20, letterSpacing: -2, flexShrink: 0 },
@@ -1593,6 +1926,7 @@ const st = {
   notaItemTituloHecha: { textDecoration: "line-through", color: C.wineSoft, fontWeight: 400 },
   notaCheckBadge: { fontSize: 12, color: C.sage, fontWeight: 700, flexShrink: 0 },
   notaBorrarBtn: { background: "transparent", border: "none", color: C.wineSoft, cursor: "pointer", fontSize: 13, padding: "2px 6px", flexShrink: 0, lineHeight: 1 },
+  notaOrdenBtn: { background: C.roseLite, border: "none", color: C.wine, cursor: "pointer", fontSize: 11, width: 26, height: 18, borderRadius: 5, lineHeight: 1, padding: 0 },
   notaProgress: { position: "absolute", bottom: 0, left: 0, right: 0, height: 3 },
   notaProgressBar: { height: "100%", background: C.gold, borderRadius: 2, width: "0%" },
 
