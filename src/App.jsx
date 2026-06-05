@@ -96,12 +96,10 @@ function calcItem(item) {
     pagado = item.pagos.reduce((s, p) => s + (Number(p.monto) || 0), 0);
   }
   const costo = Number(item.presupuesto) || 0;
-  const reservado = Number(item.reservado) || 0;
   const pendiente = Math.max(0, costo - pagado);
-  const faltaApartar = Math.max(0, pendiente - reservado);
   const completo = costo > 0 && pagado >= costo;
   const pct = costo > 0 ? Math.min(100, (pagado / costo) * 100) : pagado > 0 ? 100 : 0;
-  return { costo, reservado, pagado, pendiente, faltaApartar, completo, pct, proxima, cuotasPend, cuotasTot };
+  return { costo, pagado, pendiente, completo, pct, proxima, cuotasPend, cuotasTot };
 }
 
 /* --------------------------- Generar cuotas ----------------------------- */
@@ -230,21 +228,20 @@ export default function PlanBoda() {
 
   const totales = useMemo(() => {
     if (!data) return null;
-    let costo = 0, pagado = 0, pendiente = 0, reservado = 0;
+    let costo = 0, pagado = 0, pendiente = 0;
     data.categorias.forEach((cat) =>
       cat.items.forEach((it) => {
         const c = calcItem(it);
         costo += c.costo;
         pagado += c.pagado;
         pendiente += c.pendiente;
-        reservado += c.reservado;
       })
     );
     const ahorrado = data.ahorros.filter((a) => a.fecha <= fechaRef).reduce((s, a) => s + (+a.monto || 0), 0);
     const ingresosFut = data.ingresos.filter((i) => i.fecha > fechaRef).reduce((s, i) => s + (+i.monto || 0), 0);
     const proyectado = ahorrado + ingresosFut;
     const faltaAhorrar = Math.max(0, costo - proyectado);
-    return { costo, pagado, pendiente, reservado, ahorrado, ingresosFut, proyectado, faltaAhorrar, saldoCaja: ahorrado - pagado };
+    return { costo, pagado, pendiente, ahorrado, ingresosFut, proyectado, faltaAhorrar, saldoCaja: ahorrado - pagado };
   }, [data, fechaRef]);
 
   if (splash) return <Splash />;
@@ -605,7 +602,6 @@ function PanelResumen({ t, data }) {
             </div>
             <p style={{ ...st.hint, textAlign: "center" }}>
               Disponible hoy (ahorrado − pagado): <strong style={{ color: t.saldoCaja >= 0 ? C.sage : C.terra }}>{fmt(t.saldoCaja)}</strong>
-              {" · "}Reservado en ítems: <strong style={{ color: C.rose }}>{fmt(t.reservado)}</strong>
             </p>
           </>
         )}
