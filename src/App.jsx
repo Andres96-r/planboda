@@ -205,7 +205,7 @@ export default function PlanBoda() {
   }, []);
 
   const [errorGuardado, setErrorGuardado] = useState(null);
-  const [ocultar, setOcultar] = useState(false);
+  const [ocultar, setOcultar] = useState(true); // arranca con montos bloqueados (ojo tachado)
   const [carta, setCarta] = useState(false);
   const [pedirCodigo, setPedirCodigo] = useState(false);
   OCULTAR_MONTOS = ocultar; // se aplica en el render actual (afecta a fmt en los hijos)
@@ -237,7 +237,12 @@ export default function PlanBoda() {
         pendiente += c.pendiente;
       })
     );
-    const ahorrado = data.ahorros.filter((a) => a.fecha <= fechaRef).reduce((s, a) => s + (+a.monto || 0), 0);
+    // "ahorrado" = dinero ya realizado a la fecha: ahorros + ingresos ya cumplidos.
+    // Así, cuando un ingreso futuro llega a su fecha, pasa de "ingresosFut" a
+    // "ahorrado" sin que el total proyectado se mueva (evita la caída del %).
+    const ahorrado =
+      data.ahorros.filter((a) => a.fecha <= fechaRef).reduce((s, a) => s + (+a.monto || 0), 0) +
+      data.ingresos.filter((i) => i.fecha <= fechaRef).reduce((s, i) => s + (+i.monto || 0), 0);
     const ingresosFut = data.ingresos.filter((i) => i.fecha > fechaRef).reduce((s, i) => s + (+i.monto || 0), 0);
     const proyectado = ahorrado + ingresosFut;
     const faltaAhorrar = Math.max(0, costo - proyectado);
